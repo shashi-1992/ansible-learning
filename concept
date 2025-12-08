@@ -1,0 +1,465 @@
+                                                                                  Ansible Notes
+
+Concept: Ansible Modules
+
+Why it matters
+Modules are the building blocks of Ansible; every task calls a module. They give you idempotent, declarative operations (install package, manage files, users, services) instead of writing ad‑hoc shell scripts.
+
+Core ideas
+Modules run on the managed nodes, triggered by the control node.
+
+Tasks are just YAML wrappers around modules: one task = one module call.
+Prefer built‑in modules (apt, yum, service, file, user, copy, template, git, etc.) over shell/command.
+
+Modules return structured JSON (used for changed, failed, and register results).
+
+Mini examples
+1) Package installation
+text
+- name: Install nginx
+  apt:
+    name: nginx
+    state: present
+  become: true
+
+Key points:
+apt module, state: present = installed (idempotent).
+Use become: true for tasks needing sudo.
+
+2) File and directory management
+text
+- name: Ensure log directory exists
+  file:
+    path: /var/log/myapp
+    state: directory
+    owner: appuser
+    group: appgroup
+    mode: "0755"
+
+file module manages directories, files, symlinks.
+Declarative: re‑run does nothing if it’s already correct.
+
+3) Service management
+text
+- name: Ensure nginx is enabled and running
+  service:
+    name: nginx
+    state: started
+    enabled: true
+
+service module abstracts systemctl/init scripts.
+enabled: true makes service start on boot.
+
+4) Using register with a module
+text
+- name: Get nginx version
+  command: nginx -v
+  register: nginx_cmd
+  ignore_errors: true
+
+- name: Debug nginx version output
+  debug:
+    var: nginx_cmd.stderr
+
+Most modules’ results can be captured with register.
+Useful for conditionals and debugging.
+
+Gotchas / best practices
+Always look for a module first, use shell/command only when no module exists.
+Use state (present, absent, started, stopped) instead of running raw commands.
+Give every task a clear name: so output is readable.
+Combine modules with handlers (e.g., config change via template → handler with service module to restart).
+Keep OS‑specific modules (apt, yum, dnf, package) behind conditionals or use the generic package module when possible.
+
+
+======================================================================================================================
+======================================================================================================================
+======================================================================================================================
+Concept: Ansible Tasks
+
+Why it matters 
+Tasks are the basic units of work in a playbook. Each task calls a single module with specific arguments and, together, tasks describe the desired state of your systems step by step.
+
+Core ideas
+A task = one module invocation + parameters + metadata (name, when, register, etc.).
+Tasks run sequentially from top to bottom inside a play.
+Each task reports ok, changed, failed, or skipped.
+Tasks should be idempotent: re‑running should not break or redo already‑correct state.
+
+Mini examples
+1) Simple task
+text
+- name: Install nginx
+  apt:
+    name: nginx
+    state: present
+  become: true
+
+Clear name explains intent.
+Uses the apt module to ensure nginx is installed.
+
+2) Task with condition (when)
+text
+- name: Install httpd on RHEL
+  yum:
+    name: httpd
+    state: present
+  when: ansible_os_family == "RedHat"
+
+Runs only when the condition is true.
+Common for OS‑specific tasks.
+
+3) Task with loop
+text
+- name: Install common packages
+  package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - git
+    - curl
+    - htop
+
+One task handles multiple packages via loop.
+Cleaner than copy‑pasting multiple similar tasks.
+
+4) Task with register + using the result
+text
+- name: Check nginx config
+  command: nginx -t
+  register: nginx_check
+  ignore_errors: true
+
+- name: Fail if nginx config is invalid
+  fail:
+    msg: "Nginx config test failed"
+  when: nginx_check.rc != 0
+
+register captures task output and return code.
+Second task uses that result for logic.
+
+Gotchas / best practices
+
+Always write a clear name for every task; it’s your execution log.
+Prefer modules over shell/command to keep tasks idempotent.
+Group related tasks into roles instead of one huge playbook.
+Use when sparingly and keep conditions simple and readable.
+Use handlers for actions that should only happen when a task changed (e.g., restart services after config updates).
+
+======================================================================================================================
+======================================================================================================================
+======================================================================================================================
+Concept: Ansible Variables & Facts
+
+Why it matters 
+Variables and facts let you write flexible, reusable playbooks that adapt to different environments (hosts, OS, credentials, paths) without hard‑coding values.
+
+Core ideas
+Variables are values you define (hostnames, ports, package lists, etc.).
+Facts are variables Ansible gathers automatically about each host (OS, IP, CPU, memory, etc.).
+Variables can live in playbooks, inventory, group_vars/, host_vars/, role vars/, extra‑vars, or Vault.
+Facts are available under the ansible_ namespace (for example ansible_facts['os_family'] or ansible_os_family).
+
+Mini examples
+1) Simple variable in a playbook
+text
+- hosts: web
+  vars:
+    app_port: 8080
+
+  tasks:
+    - name: Open app port in firewall
+      firewalld:
+        port: "{{ app_port }}/tcp"
+        state: enabled
+        permanent: true
+
+vars block defines values local to this play.
+Use {{ ... }} to reference the variable.
+
+2) Variables from inventory / group_vars
+Inventory:
+
+text
+[web]
+web1 ansible_host=10.0.0.10 env=dev
+web2 ansible_host=10.0.0.11 env=prod
+group_vars/web.yml:
+
+text
+app_packages:
+  - nginx
+  - python3
+Use in playbook:
+
+text
+- hosts: web
+  tasks:
+    - name: Install app packages
+      package:
+        name: "{{ app_packages }}"
+        state: present
+
+env is per‑host; app_packages applies to all web hosts.
+
+3) Using facts for conditionals
+text
+- hosts: all
+  tasks:
+    - name: Install web server package based on OS
+      package:
+        name: "{{ 'apache2' if ansible_os_family == 'Debian' else 'httpd' }}"
+        state: present
+Or more explicitly:
+
+text
+- name: Install Apache on Debian
+  apt:
+    name: apache2
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install httpd on RedHat
+  yum:
+    name: httpd
+    state: present
+  when: ansible_os_family == "RedHat"
+
+Uses gathered facts (ansible_os_family) to choose behavior.
+
+Gotchas / best practices
+Prefer group_vars/ and host_vars/ for environment‑specific values instead of hard‑coding inside playbooks.
+Use clear, descriptive names (for example kafka_broker_port instead of port).
+Avoid putting secrets in plain vars; keep them in Vault.
+Don’t rely on facts before they’re gathered; if you disable fact gathering (gather_facts: false), call the setup module when needed.
+When debugging, use debug: var=some_variable to see what value a variable or fact actually holds.
+
+======================================================================================================================
+======================================================================================================================
+======================================================================================================================
+
+Concept: Ansible Handlers
+
+Why it matters 
+Handlers let you run actions (like restarting a service) only when a change actually happens, avoiding unnecessary restarts and making playbooks more efficient and predictable.
+
+Core ideas
+A handler is a special task defined under a handlers: section.
+Handlers run at the end of a play (by default), only if they were notified by other tasks that reported changed.
+Multiple notifications to the same handler in one play trigger it only once.
+
+Mini examples
+1) Basic handler to restart a service
+text
+- hosts: web
+  become: true
+
+  tasks:
+    - name: Deploy nginx config
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: Restart nginx
+
+  handlers:
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+notify: Restart nginx matches the handler name.
+If the template task doesn’t change the file, handler is not called.
+
+2) Multiple tasks notifying same handler
+text
+tasks:
+  - name: Update nginx main config
+    template:
+      src: nginx.conf.j2
+      dest: /etc/nginx/nginx.conf
+    notify: Restart nginx
+
+  - name: Update site config
+    template:
+      src: site.conf.j2
+      dest: /etc/nginx/conf.d/site.conf
+    notify: Restart nginx
+
+handlers:
+  - name: Restart nginx
+    service:
+      name: nginx
+      state: restarted
+Even if both tasks change files, Restart nginx runs only once at the end.
+
+3) Forcing handlers to run earlier (when needed)
+text
+- name: Do some config changes
+  import_tasks: web.yml
+
+- name: Run handlers now
+  meta: flush_handlers
+meta: flush_handlers forces all pending handlers to run immediately (useful before dependent steps).
+
+Gotchas / best practices
+Use handlers for side‑effects like restarts, reloads, cache clears.
+Never restart services unconditionally in regular tasks; always use handlers + notify.
+Handler names should be clear and unique within the play (for example Restart nginx, Reload systemd).
+Remember handlers are per‑play: if you include roles/plays, each can define its own handlers.
+
+======================================================================================================================
+======================================================================================================================
+======================================================================================================================
+Concept: Ansible Jinja2 Templating
+
+Why it matters 
+Jinja2 templates let you generate dynamic config files and scripts using variables, conditionals, and loops, instead of hard‑coded static files per environment.
+
+Core ideas
+Templates are usually stored in a role’s templates/ directory with .j2 extension.
+The template module copies a file from control node → target and renders all Jinja2 expressions.
+Inside templates you can use variables ({{ var }}), conditionals ({% if %}), loops ({% for %}), filters ({{ var | default('x') }}), etc.
+
+Mini examples
+1) Simple Nginx config template
+templates/nginx.conf.j2:
+
+text
+server {
+    listen {{ app_port }};
+    server_name {{ app_host }};
+
+    location / {
+        proxy_pass http://{{ backend_host }}:{{ backend_port }};
+    }
+}
+Playbook:
+
+text
+- hosts: web
+  vars:
+    app_port: 80
+    app_host: myapp.example.com
+    backend_host: 127.0.0.1
+    backend_port: 8080
+
+  tasks:
+    - name: Render nginx config
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+
+Same template works for dev/stage/prod just by changing vars.
+
+2) Conditionals in template
+text
+# /etc/myapp/config.yml
+debug: {{ 'true' if env == 'dev' else 'false' }}
+
+{% if env == 'prod' %}
+log_level: warning
+{% else %}
+log_level: debug
+{% endif %}
+Behavior changes based on env without separate config files.
+
+3) Loop in template (list of upstreams)
+text
+upstream backend {
+{% for host in backend_hosts %}
+    server {{ host }}:{{ backend_port }};
+{% endfor %}
+}
+Combine with vars:
+
+text
+vars:
+  backend_hosts:
+    - 10.0.0.11
+    - 10.0.0.12
+  backend_port: 9000
+
+Gotchas / best practices
+Always keep templates in templates/ folder of the role or project; avoid inline multi‑line strings in playbooks.
+Use {{ var | default('value') }} to handle missing variables cleanly.
+Keep logic in templates light—heavy decisions are better in the playbook (with when) feeding clean vars to the template.
+Validate rendered configs where possible (for example run nginx -t after updating nginx.conf via handler).
+
+======================================================================================================================
+======================================================================================================================
+======================================================================================================================
+
+Concept: Ansible Roles
+Why it matters 
+Roles provide a standard way to organize playbooks into reusable units (install web server, configure Kafka, create users) so projects stay clean, modular, and easy to share.
+
+Core ideas
+A role is a self‑contained bundle of tasks, handlers, templates, files, vars, etc.
+Roles live under a roles/ directory and are included from playbooks with roles: (or import_role / include_role).
+Each role focuses on one concern: webserver, database, monitoring agent, user hardening, etc.
+
+Typical role structure
+text
+roles/
+  webserver/
+    tasks/
+      main.yml
+    handlers/
+      main.yml
+    templates/
+      nginx.conf.j2
+    files/
+    vars/
+      main.yml
+    defaults/
+      main.yml
+    meta/
+      main.yml
+tasks/main.yml: main list of tasks for the role.
+handlers/main.yml: handlers used by this role.
+templates/: Jinja2 templates.
+files/: static files to copy.
+vars/ and defaults/: variables (defaults are lowest‑priority).
+
+Mini examples
+1) Using a role in a playbook
+text
+- hosts: web
+  become: true
+  roles:
+    - webserver
+This will run roles/webserver/tasks/main.yml on all web hosts.
+
+2) Simple tasks/main.yml inside a webserver role
+text
+# roles/webserver/tasks/main.yml
+- name: Install nginx
+  package:
+    name: nginx
+    state: present
+
+- name: Deploy nginx config
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+  notify: Restart nginx
+
+- name: Ensure nginx running
+  service:
+    name: nginx
+    state: started
+    enabled: true
+roles/webserver/handlers/main.yml:
+
+text
+- name: Restart nginx
+  service:
+    name: nginx
+    state: restarted
+Role contains everything needed to set up nginx.
+
+Gotchas / best practices
+Design roles to be reusable and parameterized via vars (for example, ports, paths, domains).
+Keep one responsibility per role; avoid “mega‑roles” that do everything.
+Use defaults/main.yml for safe default values that callers can override; avoid hard‑coding env‑specific values.
+For production, keep roles in version control and, if shared across projects, in a separate repo or Ansible Galaxy namespace
