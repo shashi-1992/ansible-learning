@@ -1,0 +1,595 @@
+# Strimzi Kafka Operator - programlogic Complete Deployment
+
+## Your Task
+
+> "I've task of deploying Strimzi Kafka Operator which reads from programlogic i.e is producer and consumer also same (not decided). How to do"
+
+**Answer:** Complete deployment guide based on your existing Strimzi setup (KRaft mode).
+
+---
+
+## Overview
+
+**What you need:**
+1. Deploy Strimzi Operator
+2. Create Kafka Cluster (KRaft mode - no Zookeeper)
+3. Create Kafka Topic for programlogic
+4. Configure programlogic as producer/consumer
+
+---
+
+## Step 1: Install Strimzi Operator
+
+### Using Helm (Based on Your Existing Setup)
+
+```bash
+# Template operator (to see what will be installed)
+helm template strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+  --version 0.48.0 \
+  --namespace kafka \
+  --set watchNamespaces={kafka} \
+  --include-crds > all-strimzi-operator.yaml
+
+# Review the generated YAML
+cat all-strimzi-operator.yaml
+
+# Install operator
+helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+  --version 0.48.0 \
+  --namespace kafka \
+  --create-namespace \
+  --set watchNamespaces={kafka}
+```
+
+### Verify Installation
+
+```bash
+# Check operator pod
+kubectl get pods -n kafka -l name=strimzi-cluster-operator
+
+# Should see:
+# NAME                                        READY   STATUS
+# strimzi-cluster-operator-xxx                1/1     Running
+```
+
+---
+
+## Step 2: Create Kafka Cluster (KRaft Mode)
+
+**Based on your existing setup, here's the KRaft mode cluster (no Zookeeper):**
+
+```yaml
+# kafka-cluster-programlogic.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: programlogic-kafka
+  namespace: kafka
+spec:
+  kafka:
+    version: 3.9.1  # Or 3.6.0
+    
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+    
+    config:
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+  
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+```
+
+**Create KafkaNodePool (KRaft mode requires this):**
+
+```yaml
+# kafka-nodepool-programlogic.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: programlogic-nodes
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: programlogic-kafka
+spec:
+  replicas: 3
+  roles:
+    - controller
+    - broker
+  
+  resources:
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+  
+  template:
+    pod:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  strimzi.io/name: programlogic-kafka-kafka
+              topologyKey: topology.kubernetes.io/zone
+  
+  storage:
+    type: persistent-claim
+    size: 50Gi  # Adjust based on needs
+    class: oci-bv  # Or gp3 for AWS, adjust for your cloud
+    deleteClaim: false
+```
+
+**⚠️ IMPORTANT: Apply Order**
+
+```bash
+# Step 1: Apply NodePool FIRST
+kubectl apply -f kafka-nodepool-programlogic.yaml
+
+# Step 2: Apply Cluster SECOND
+kubectl apply -f kafka-cluster-programlogic.yaml
+```
+
+**Wait for cluster:**
+
+```bash
+# Watch status
+kubectl get kafka -n kafka -w
+
+# Check pods (wait for all Running)
+kubectl get pods -n kafka
+
+# Should see:
+# programlogic-kafka-kafka-0         1/1     Running
+# programlogic-kafka-kafka-1         1/1     Running
+# programlogic-kafka-kafka-2         1/1     Running
+# (No Zookeeper pods - KRaft mode!)
+```
+
+---
+
+## Step 3: Create Kafka Topic for programlogic
+
+```yaml
+# kafka-topic-programlogic.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: programlogic-events
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: programlogic-kafka
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: 604800000  # 7 days
+    segment.ms: 86400000     # 1 day
+    min.insync.replicas: 2
+    compression.type: snappy
+```
+
+**Apply:**
+
+```bash
+kubectl apply -f kafka-topic-programlogic.yaml
+```
+
+**Verify:**
+
+```bash
+kubectl get kafkatopic -n kafka
+
+# Should see:
+# NAME                    CLUSTER              PARTITIONS   REPLICATION FACTOR
+# programlogic-events      programlogic-kafka   3            3
+```
+
+---
+
+## Step 4: Create Kafka User (Optional - for TLS)
+
+**If using TLS (recommended for production):**
+
+```yaml
+# kafka-user-programlogic.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: programlogic-user
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: programlogic-kafka
+spec:
+  authentication:
+    type: tls  # Or scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # Producer permissions
+      - resource:
+          type: topic
+          name: programlogic-events
+          patternType: literal
+        operations:
+          - Write
+          - Create
+          - Describe
+      # Consumer permissions
+      - resource:
+          type: topic
+          name: programlogic-events
+          patternType: literal
+        operations:
+          - Read
+          - Describe
+      # Consumer group permissions
+      - resource:
+          type: group
+          name: programlogic-consumer-group
+          patternType: literal
+        operations:
+          - Read
+```
+
+**Apply:**
+
+```bash
+kubectl apply -f kafka-user-programlogic.yaml
+```
+
+**Get credentials:**
+
+```bash
+# Secret created automatically
+kubectl get secret programlogic-user -n kafka
+```
+
+---
+
+## Step 5: Get Bootstrap Server
+
+**Internal (within cluster):**
+
+```bash
+# Get bootstrap server (plain - no TLS)
+BOOTSTRAP=$(kubectl get kafka programlogic-kafka -n kafka \
+  -o jsonpath='{.status.listeners[?(@.type=="plain")].bootstrapServers}')
+
+echo $BOOTSTRAP
+# Output: programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+
+# For TLS
+BOOTSTRAP_TLS=$(kubectl get kafka programlogic-kafka -n kafka \
+  -o jsonpath='{.status.listeners[?(@.type=="tls")].bootstrapServers}')
+
+echo $BOOTSTRAP_TLS
+# Output: programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9093
+```
+
+---
+
+## Step 6: Deploy programlogic
+
+### Option A: Producer Only
+
+```yaml
+# programlogic-producer.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: programlogic-producer
+  namespace: default  # Or your namespace
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: programlogic-producer
+  template:
+    metadata:
+      labels:
+        app: programlogic-producer
+    spec:
+      containers:
+      - name: programlogic
+        image: your-registry/programlogic:latest
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+        - name: KAFKA_TOPIC
+          value: "programlogic-events"
+        - name: KAFKA_PRODUCER_ENABLED
+          value: "true"
+        # Add TLS config if using TLS
+        # - name: KAFKA_SECURITY_PROTOCOL
+        #   value: "SSL"
+```
+
+---
+
+### Option B: Consumer Only
+
+```yaml
+# programlogic-consumer.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: programlogic-consumer
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: programlogic-consumer
+  template:
+    metadata:
+      labels:
+        app: programlogic-consumer
+    spec:
+      containers:
+      - name: programlogic
+        image: your-registry/programlogic:latest
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+        - name: KAFKA_TOPIC
+          value: "programlogic-events"
+        - name: KAFKA_GROUP_ID
+          value: "programlogic-consumer-group"
+        - name: KAFKA_CONSUMER_ENABLED
+          value: "true"
+        - name: KAFKA_AUTO_OFFSET_RESET
+          value: "earliest"
+```
+
+---
+
+### Option C: Both Producer AND Consumer (Recommended)
+
+```yaml
+# programlogic-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: programlogic
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: programlogic
+  template:
+    metadata:
+      labels:
+        app: programlogic
+    spec:
+      containers:
+      - name: programlogic
+        image: your-registry/programlogic:latest
+        env:
+        # Kafka Connection
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+        - name: KAFKA_TOPIC
+          value: "programlogic-events"
+        - name: KAFKA_GROUP_ID
+          value: "programlogic-consumer-group"
+        
+        # Producer Settings
+        - name: KAFKA_PRODUCER_ENABLED
+          value: "true"
+        - name: KAFKA_PRODUCER_ACKS
+          value: "all"
+        
+        # Consumer Settings
+        - name: KAFKA_CONSUMER_ENABLED
+          value: "true"
+        - name: KAFKA_AUTO_OFFSET_RESET
+          value: "earliest"
+        
+        # Security (if using TLS - uncomment)
+        # - name: KAFKA_SECURITY_PROTOCOL
+        #   value: "SSL"
+        # - name: KAFKA_SSL_CA_LOCATION
+        #   value: "/etc/kafka/ca.crt"
+        # - name: KAFKA_SSL_CERT_LOCATION
+        #   value: "/etc/kafka/user.crt"
+        # - name: KAFKA_SSL_KEY_LOCATION
+        #   value: "/etc/kafka/user.key"
+        
+        # Uncomment if using TLS:
+        # volumeMounts:
+        # - name: kafka-certs
+        #   mountPath: /etc/kafka
+        #   readOnly: true
+      # Uncomment if using TLS:
+      # volumes:
+      # - name: kafka-certs
+      #   secret:
+      #     secretName: programlogic-user
+```
+
+**Apply:**
+
+```bash
+kubectl apply -f programlogic-deployment.yaml
+```
+
+---
+
+## Step 7: Verify & Test
+
+### Check Kafka Cluster
+
+```bash
+# Check cluster
+kubectl get kafka -n kafka
+
+# Check pods
+kubectl get pods -n kafka
+
+# Check topics
+kubectl get kafkatopic -n kafka
+```
+
+### Check programlogic
+
+```bash
+# Check pods
+kubectl get pods -l app=programlogic
+
+# Check logs
+kubectl logs -l app=programlogic --tail=50
+
+# Check for Kafka connection
+kubectl logs -l app=programlogic | grep -i kafka
+```
+
+### Test Producer/Consumer
+
+```bash
+# Get Kafka pod
+KAFKA_POD=$(kubectl get pods -n kafka -l strimzi.io/kind=Kafka -o name | head -1 | cut -d/ -f2)
+
+# Test producer
+kubectl exec -it $KAFKA_POD -n kafka -- bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic programlogic-events
+
+# Test consumer
+kubectl exec -it $KAFKA_POD -n kafka -- bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic programlogic-events \
+  --from-beginning
+```
+
+---
+
+## Quick Start - All Commands
+
+```bash
+# 1. Install Strimzi Operator
+helm repo add strimzi https://strimzi.io/charts/
+helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+  --version 0.48.0 \
+  --namespace kafka \
+  --create-namespace \
+  --set watchNamespaces={kafka}
+
+# 2. Wait for operator
+kubectl wait --for=condition=ready pod -l name=strimzi-cluster-operator -n kafka --timeout=300s
+
+# 3. Create NodePool FIRST
+kubectl apply -f kafka-nodepool-programlogic.yaml
+
+# 4. Create Cluster SECOND
+kubectl apply -f kafka-cluster-programlogic.yaml
+
+# 5. Wait for Kafka (5-10 minutes)
+kubectl wait --for=condition=ready kafka/programlogic-kafka -n kafka --timeout=600s
+
+# 6. Create topic
+kubectl apply -f kafka-topic-programlogic.yaml
+
+# 7. Create user (optional)
+kubectl apply -f kafka-user-programlogic.yaml
+
+# 8. Deploy programlogic
+kubectl apply -f programlogic-deployment.yaml
+
+# 9. Verify
+kubectl get pods -n kafka
+kubectl get pods -l app=programlogic
+```
+
+---
+
+## Decision: Producer, Consumer, or Both?
+
+**Recommendation: Start with BOTH**
+
+**Why:**
+- ✅ Maximum flexibility
+- ✅ Can process and forward events
+- ✅ Easier to change later
+- ✅ Matches your existing streamix patterns
+
+**You can always:**
+- Disable producer later (if only consuming)
+- Disable consumer later (if only producing)
+- Keep both (if doing both)
+
+---
+
+## Integration with Your Existing Code
+
+**You have `streamix` library - use it:**
+
+```go
+// In programlogic code
+import (
+    "bitbucket.org/exotel/exotel_code/commonix/lib/streamix/go"
+)
+
+// Producer
+producer, err := streamix.GetStreamProducer(&streamix.StreamConfig{
+    Stream: "kafka",
+    Config: map[string]interface{}{
+        "hosts": "programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+        "topic": "programlogic-events",
+    },
+})
+
+// Consumer
+consumer, err := streamix.GetStreamConsumer(&streamix.StreamConfig{
+    Stream: "kafka",
+    Config: map[string]interface{}{
+        "hosts": "programlogic-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+        "topic": "programlogic-events",
+        "group_id": "programlogic-consumer-group",
+        "auto_offset_reset": "earliest",
+    },
+})
+```
+
+---
+
+## Summary
+
+**Complete setup:**
+1. ✅ Install Strimzi Operator (Helm)
+2. ✅ Create KafkaNodePool (KRaft mode)
+3. ✅ Create Kafka Cluster (KRaft mode)
+4. ✅ Create Kafka Topic
+5. ✅ Create Kafka User (optional)
+6. ✅ Deploy programlogic (Producer/Consumer/Both)
+
+**Files to create:**
+- `kafka-nodepool-programlogic.yaml`
+- `kafka-cluster-programlogic.yaml`
+- `kafka-topic-programlogic.yaml`
+- `kafka-user-programlogic.yaml` (optional)
+- `programlogic-deployment.yaml`
+
+**Next steps:**
+1. Decide: Producer, Consumer, or Both? (Recommend: Both)
+2. Create the YAML files
+3. Apply in order (NodePool first, then Cluster)
+4. Test the setup
+
+Ready to deploy! 🚀
+
