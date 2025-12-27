@@ -1,0 +1,307 @@
+# Jenkins Agent Pod - Go Version from Public ECR
+
+## Overview
+
+**What you need:**
+- Agent pod that uses a Go version image from **public ECR**
+- The image itself contains the Go version
+- Pod fetches image from public ECR and executes your Go code
+- Pod terminates automatically after completion
+
+---
+
+## How It Works - Descriptive Flow
+
+### Step 1: Pipeline Starts
+
+**What happens:**
+- Jenkins pipeline is triggered (by code push, manual, etc.)
+- Pipeline needs to build/run Go code
+- Pipeline needs to know which Go version to use
+
+---
+
+### Step 2: Use Pre-baked Go Image
+
+**What happens:**
+- Pipeline uses a pre-baked Go image from public ECR
+- Image is already available: `public.ecr.aws/docker/library/golang:1.21.5` (or your specific image)
+- No need to read version or construct image name
+- The image contains Go compiler and tools ready to use
+
+---
+
+### Step 3: Create Agent Pod
+
+**What happens:**
+- Jenkins creates a Kubernetes pod in the cluster
+- Pod uses the Go version image from public ECR
+- Pod is created in `infra` namespace (or your specified namespace)
+- Pod has access to your code repository
+
+**Pod structure:**
+```
+┌─────────────────────────────────────┐
+│  Jenkins Agent Pod                  │
+│  ┌───────────────────────────────┐ │
+│  │  Container: go                 │ │
+│  │  Image: public.ecr.aws/.../    │ │
+│  │         golang:1.21.5           │ │
+│  │                                 │ │
+│  │  Contains:                      │ │
+│  │  - Go compiler                  │ │
+│  │  - Go tools                     │ │
+│  │  - Standard library             │ │
+│  └───────────────────────────────┘ │
+└─────────────────────────────────────┘
+```
+
+---
+
+### Step 4: Clone Your Code Repository
+
+**What happens:**
+- Pod clones your Go code repository
+- Code is checked out into pod's filesystem
+- Pod now has both:
+  - Go environment (from the image)
+  - Your Go source code (from repository)
+
+**Example:**
+```
+Pod filesystem:
+├── /workspace/
+│   ├── go.mod          ← Your Go code
+│   ├── go.sum
+│   ├── main.go
+│   └── ...
+```
+
+---
+
+### Step 5: Execute Go Commands
+
+**What happens:**
+- The pipeline executes Go-related commands inside the pod
+- These commands run using the Go version that comes with the container image
+- Common operations include:
+  - Downloading Go module dependencies
+  - Compiling your Go source code into binaries
+  - Running automated tests
+  - Executing your Go application
+
+**Execution flow:**
+The pipeline sends a build command to the pod. The pod receives this command and executes it using the Go compiler that is part of the container image. The compiler processes your source code files and generates compiled binaries or other build artifacts as output.
+
+---
+
+### Step 6: Build Docker Image (Optional)
+
+**What happens:**
+- If you need to create a Docker image from your compiled Go binary:
+- The pipeline uses container build tools that are available in the pod
+- These tools package your compiled Go binary into a Docker image
+- The final image is pushed to your private container registry
+
+**Note:** This step might require a pod with multiple containers - one for Go compilation and another for Docker image building
+
+---
+
+### Step 7: Pod Termination
+
+**What happens:**
+- Pipeline completes (success or failure)
+- Jenkins automatically terminates the pod
+- Pod is deleted from Kubernetes cluster
+- All resources are cleaned up
+- No manual cleanup needed
+
+**Why it terminates:**
+- Pod is created as part of the pipeline execution
+- When the pipeline stage completes, Jenkins automatically deletes the pod
+- This is automatic - no explicit termination needed
+
+---
+
+## Complete Pipeline Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Pipeline Triggered                                         │
+│    - Code push / Manual trigger                              │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. Create Kubernetes Pod                                     │
+│    - Namespace: infra                                        │
+│    - Container: Pre-baked Go image (from public ECR)         │
+│    - Pod is ready to execute Go commands                     │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Clone Your Go Code Repository                            │
+│    - Checkout your source code                               │
+│    - Code now available in pod                              │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. Execute Go Commands Inside Pod                           │
+│    - go mod download                                         │
+│    - go build ./...                                          │
+│    - go test ./...                                           │
+│    - (Your Go code executes here)                           │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. Build Docker Image (if needed)                           │
+│    - Use nerdctl/docker to build final image                │
+│    - Push to private ECR                                    │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 6. Pipeline Completes                                        │
+│    - Success or failure                                      │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 7. Pod Terminates Automatically                              │
+│    - Jenkins deletes pod                                     │
+│    - Resources cleaned up                                    │
+│    - No manual cleanup needed                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Pre-baked Go Image
+
+**Image:** `public.ecr.aws/docker/library/golang:1.21.5` (or your specific pre-baked image)
+
+**No authentication needed** - Public images pull directly from AWS Public ECR.
+
+**The image contains:**
+- Go compiler and tools
+- Standard Go environment
+- Ready to compile/run your Go code
+
+---
+
+## Key Points
+
+- **Image = Go Version:** `golang:1.21.5` image contains Go 1.21.5 compiler
+- **Public ECR:** No authentication needed, fast pulls from AWS
+- **Pod Execution:** Go compiler (from image) compiles your code (from repository)
+- **Auto Termination:** Pod terminates automatically when pipeline completes
+
+---
+
+
+## Summary
+
+**Simple flow:**
+1. **Read Go version** from your public repo
+2. **Use that version** to construct image name: `public.ecr.aws/.../golang:VERSION`
+3. **Create pod** with that image (pulled from public ECR)
+4. **Clone your code** into pod
+5. **Execute Go commands** (using Go from image on your code)
+6. **Pod terminates** automatically when done
+
+**Key points:**
+- Image = Go version (from public ECR)
+- Image contains Go compiler/tools
+- Pod executes your code using Go from image
+- Automatic cleanup - no manual termination needed
+
+That's it! 🚀
+
+---
+
+## Simple Pipeline Code (Declarative Syntax)
+
+**Simple declarative pipeline** (like from snippet generator):
+
+```groovy
+pipeline {
+    agent any
+    
+    stages {
+        stage('Build') {
+            steps {
+                // Create pod with pre-baked Go image from public ECR
+                podTemplate(
+                    namespace: 'infra',
+                    serviceAccount: 'jenkins',
+                    containers: [
+                        containerTemplate(
+                            name: 'go',
+                            image: 'public.ecr.aws/docker/library/golang:1.21.5',
+                            command: 'cat',
+                            ttyEnabled: true
+                        )
+                    ]
+                ) {
+                    container('go') {
+                        // Explicit checkout of your Go repository
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[name: "*/${env.BRANCH_NAME}"]],
+                            userRemoteConfigs: [[
+                                url: 'git@bitbucket.org:Exotel/your-go-repo.git',
+                                credentialsId: 'bitbucket-ssh-key'
+                            ]]
+                        ])
+                        
+                        sh 'go version'
+                        sh 'go mod download'
+                        sh 'go build ./...'
+                        sh 'go test ./...'
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline finished - pod will terminate automatically'
+        }
+    }
+}
+```
+
+**Note:** This is declarative pipeline syntax. The pod runs on any available node and terminates automatically when done.
+
+---
+
+## Repository and Credentials Configuration
+
+### Where Are Credentials Stored?
+
+**Jenkins Credentials Store:**
+```
+Jenkins Dashboard
+  → Manage Jenkins
+    → Credentials
+      → System
+        → Global credentials
+          → bitbucket-ssh-key (SSH Username with private key)
+```
+
+**Credential Types:**
+- **SSH Username with private key** - For `git@bitbucket.org:...` URLs
+- **Username with password** - For HTTPS URLs
+
+**Credential ID:** `bitbucket-ssh-key` (or your credential name)
+
+### Explicit Checkout in Pipeline
+
+**The pipeline uses explicit checkout with:**
+- Repository URL: `git@bitbucket.org:Exotel/your-go-repo.git`
+- Credential ID: `bitbucket-ssh-key`
+- Branch: `${env.BRANCH_NAME}` (the branch that triggered the build)
+
+**To configure credentials:**
+1. Add SSH key to Jenkins credentials store
+2. Note the credential ID (e.g., `bitbucket-ssh-key`)
+3. Use that ID in the pipeline checkout step
+
