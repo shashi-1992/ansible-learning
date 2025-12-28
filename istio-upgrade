@@ -1,0 +1,572 @@
+# Istio Upgrade Process in exotel_deployments
+
+## Overview
+
+**What is Istio?**
+- Service mesh for Kubernetes
+- Provides traffic management, security, and observability
+- Manages communication between microservices
+
+**Upgrade Context:**
+- Istio upgrades are managed through `exotel_deployments` repository
+- Istio configuration files (VirtualService, Gateway, DestinationRule) are stored in `exotel_deployments`
+- ArgoCD watches `exotel_deployments` and applies Istio changes to Kubernetes
+
+---
+
+## Istio Components in exotel_deployments
+
+### **Typical Structure**
+
+```
+exotel_deployments/
+├── master/                          # or nextrelease, proposedupdates
+│   └── {service}/
+│       └── {environment}/
+│           ├── deployment.yaml
+│           ├── service.yaml
+│           ├── istio-virtualservice.yaml    # ← Istio traffic routing
+│           ├── istio-gateway.yaml           # ← Istio ingress gateway
+│           └── istio-destinationrule.yaml   # ← Istio destination rules
+```
+
+---
+
+## Istio Upgrade Process
+
+### **Step 1: Upgrade Istio Control Plane**
+
+**What is Istio Control Plane?**
+- **istiod:** Istio control plane (replaces istio-pilot, istio-galley, istio-citadel)
+- **istio-ingressgateway:** Ingress gateway for external traffic
+- **istio-egressgateway:** Egress gateway for outbound traffic
+
+**How to upgrade (AWS Console or kubectl):**
+
+#### **Option 1: Using Helm (Recommended)**
+
+```bash
+# Check current Istio version
+istioctl version
+
+# Upgrade Istio control plane
+helm upgrade istio-base istio/base \
+  --namespace istio-system \
+  --version <new-version>
+
+helm upgrade istiod istio/istiod \
+  --namespace istio-system \
+  --version <new-version>
+
+# Upgrade ingress gateway
+helm upgrade istio-ingressgateway istio/gateway \
+  --namespace istio-system \
+  --version <new-version>
+```
+
+#### **Option 2: Using istioctl**
+
+```bash
+# Upgrade Istio
+istioctl upgrade --set values.global.istiod.enableAnalysis=true
+```
+
+**Expected time:** 10-20 minutes
+
+---
+
+### **Step 2: Update Istio Configuration in exotel_deployments**
+
+**What needs updating?**
+- **VirtualService:** Traffic routing rules (may need API version updates)
+- **Gateway:** Ingress/egress gateway configuration
+- **DestinationRule:** Load balancing, circuit breakers, TLS settings
+- **ServiceEntry:** External service entries
+- **Sidecar:** Sidecar proxy configuration
+
+**Example: Upgrading VirtualService**
+
+#### **Before (Istio 1.23):**
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: frodo-vs
+spec:
+  hosts:
+  - frodo.example.com
+  http:
+  - match:
+    - uri:
+        prefix: "/api"
+    route:
+    - destination:
+        host: frodo
+        subset: v1
+```
+
+#### **After (Istio 1.24):**
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: frodo-vs
+spec:
+  hosts:
+  - frodo.example.com
+  http:
+  - match:
+    - uri:
+        prefix: "/api"
+    route:
+    - destination:
+        host: frodo
+        subset: v1
+      weight: 100  # ← May need explicit weight
+```
+
+**Key Changes:**
+- API versions may change (check Istio release notes)
+- Some fields may be deprecated
+- New fields may be required
+
+---
+
+### **Step 3: Update Service Manifests**
+
+**What needs updating?**
+- **Deployment annotations:** Istio sidecar injection annotations
+- **Service labels:** May need updates for new Istio features
+
+**Example: Sidecar Injection**
+
+#### **Before:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frodo
+spec:
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+```
+
+#### **After (if needed):**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frodo
+spec:
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+        sidecar.istio.io/proxyImage: "istio/proxyv2:1.24.3"  # ← Explicit version
+```
+
+---
+
+### **Step 4: Update exotel_deployments Repository**
+
+**Process:**
+
+1. **Clone exotel_deployments:**
+```bash
+git clone git@bitbucket.org:Exotel/exotel_deployments.git
+cd exotel_deployments
+```
+
+2. **Checkout appropriate branch:**
+```bash
+# For QA/Integration
+git checkout nextrelease  # or proposedupdates
+
+# For Production
+git checkout main  # or master
+```
+
+3. **Update Istio manifests:**
+```bash
+# Navigate to service directory
+cd frodo/qa_us3/  # or integration, prod, etc.
+
+# Update istio-virtualservice.yaml
+# Update istio-gateway.yaml
+# Update istio-destinationrule.yaml
+```
+
+4. **Commit and push:**
+```bash
+git add frodo/qa_us3/istio-*.yaml
+git commit -m "Upgrade Istio to 1.24.3 for frodo service"
+git push origin nextrelease  # or main
+```
+
+5. **ArgoCD automatically syncs:**
+   - ArgoCD detects changes in `exotel_deployments`
+   - Applies updated Istio manifests to Kubernetes
+   - Updates VirtualService, Gateway, DestinationRule
+
+---
+
+## Complete Upgrade Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Step 1: Upgrade Istio Control Plane                           │
+│    - Upgrade istiod, istio-ingressgateway                    │
+│    - Done via Helm or istioctl                                │
+│    - Time: ~10-20 minutes                                     │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 2: Update Istio Manifests in exotel_deployments         │
+│    - Update VirtualService, Gateway, DestinationRule          │
+│    - Update API versions if needed                            │
+│    - Update deprecated fields                                │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 3: Update Service Manifests                             │
+│    - Update sidecar injection annotations                    │
+│    - Update service labels if needed                         │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 4: Commit and Push to exotel_deployments                │
+│    - git add, commit, push                                    │
+│    - ArgoCD detects changes                                   │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 5: ArgoCD Syncs Changes                                │
+│    - ArgoCD applies updated Istio manifests                  │
+│    - Updates VirtualService, Gateway, DestinationRule         │
+│    - Restarts pods if needed                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Example: Upgrading from Istio 1.23 to 1.24.3
+
+### **Step 1: Upgrade Control Plane**
+
+```bash
+# Check current version
+istioctl version
+
+# Upgrade Istio
+helm repo update
+helm upgrade istio-base istio/base \
+  --namespace istio-system \
+  --version 1.24.3
+
+helm upgrade istiod istio/istiod \
+  --namespace istio-system \
+  --version 1.24.3
+
+helm upgrade istio-ingressgateway istio/gateway \
+  --namespace istio-system \
+  --version 1.24.3
+```
+
+---
+
+### **Step 2: Update VirtualService**
+
+**File:** `exotel_deployments/nextrelease/frodo/qa_us3/istio-virtualservice.yaml`
+
+**Before:**
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: frodo-vs
+spec:
+  hosts:
+  - frodo.example.com
+  http:
+  - route:
+    - destination:
+        host: frodo
+        subset: blue
+```
+
+**After:**
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: frodo-vs
+spec:
+  hosts:
+  - frodo.example.com
+  http:
+  - route:
+    - destination:
+        host: frodo
+        subset: blue
+      weight: 100  # ← Explicit weight (may be required)
+```
+
+---
+
+### **Step 3: Update Gateway**
+
+**File:** `exotel_deployments/nextrelease/frodo/qa_us3/istio-gateway.yaml`
+
+**Before:**
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: frodo-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - frodo.example.com
+```
+
+**After:**
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: frodo-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - frodo.example.com
+    # No changes needed for this example
+```
+
+---
+
+### **Step 4: Update DestinationRule**
+
+**File:** `exotel_deployments/nextrelease/frodo/qa_us3/istio-destinationrule.yaml`
+
+**Before:**
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: frodo-dr
+spec:
+  host: frodo
+  subsets:
+  - name: blue
+    labels:
+      version: blue
+```
+
+**After:**
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: frodo-dr
+spec:
+  host: frodo
+  subsets:
+  - name: blue
+    labels:
+      version: blue
+  trafficPolicy:
+    loadBalancer:
+      simple: ROUND_ROBIN  # ← May need explicit policy
+```
+
+---
+
+### **Step 5: Commit and Push**
+
+```bash
+cd exotel_deployments
+git checkout nextrelease
+
+# Update files
+vim frodo/qa_us3/istio-virtualservice.yaml
+vim frodo/qa_us3/istio-gateway.yaml
+vim frodo/qa_us3/istio-destinationrule.yaml
+
+# Commit
+git add frodo/qa_us3/istio-*.yaml
+git commit -m "Upgrade Istio to 1.24.3 for frodo service in qa_us3"
+git push origin nextrelease
+```
+
+---
+
+### **Step 6: Verify ArgoCD Sync**
+
+**Check ArgoCD UI:**
+1. Go to ArgoCD UI
+2. Find application: `frodo-qa` (or similar)
+3. Check sync status
+4. Verify VirtualService, Gateway, DestinationRule are updated
+
+**Or via kubectl:**
+```bash
+# Check VirtualService
+kubectl get virtualservice frodo-vs -n frodo -o yaml
+
+# Check Gateway
+kubectl get gateway frodo-gateway -n frodo -o yaml
+
+# Check DestinationRule
+kubectl get destinationrule frodo-dr -n frodo -o yaml
+
+# Check Istio version
+istioctl version
+```
+
+---
+
+## Important Considerations
+
+### **1. API Version Compatibility**
+
+**Check Istio release notes for:**
+- API version changes (`v1alpha3` → `v1beta1`)
+- Deprecated fields
+- Required new fields
+
+**Example:**
+- Istio 1.23: `networking.istio.io/v1beta1`
+- Istio 1.24: `networking.istio.io/v1beta1` (same, but check for field changes)
+
+---
+
+### **2. Sidecar Proxy Version**
+
+**Important:**
+- Sidecar proxies must be compatible with control plane version
+- Update sidecar image version in deployments if needed
+
+**Check sidecar version:**
+```bash
+kubectl get pods -n frodo -o jsonpath='{.items[*].spec.containers[*].image}' | grep proxy
+```
+
+---
+
+### **3. Breaking Changes**
+
+**Common breaking changes:**
+- **Field deprecations:** Some fields may be removed
+- **Default behavior changes:** Defaults may change
+- **API changes:** API structure may change
+
+**Always check:**
+- Istio release notes
+- Upgrade guide for your version
+- Breaking changes documentation
+
+---
+
+### **4. Rollback Plan**
+
+**If upgrade fails:**
+
+#### **Rollback Control Plane:**
+```bash
+# Rollback to previous version
+helm rollback istiod istio-system
+helm rollback istio-ingressgateway istio-system
+```
+
+#### **Rollback Manifests:**
+```bash
+# Revert changes in exotel_deployments
+cd exotel_deployments
+git checkout HEAD~1 frodo/qa_us3/istio-*.yaml
+git commit -m "Rollback Istio upgrade"
+git push origin nextrelease
+```
+
+---
+
+## Pre-Upgrade Checklist
+
+**Before starting upgrade:**
+
+- [ ] **Check current Istio version:** `istioctl version`
+- [ ] **Review Istio release notes:** Check for breaking changes
+- [ ] **Backup Istio manifests:** Export current VirtualService, Gateway, DestinationRule
+- [ ] **Test in non-production:** Test upgrade in QA/Integration first
+- [ ] **Check compatibility:** Ensure Kubernetes version is compatible
+- [ ] **Review service dependencies:** Check which services use Istio features
+- [ ] **Plan downtime:** Schedule during maintenance window if needed
+
+---
+
+## Post-Upgrade Checklist
+
+**After upgrade completes:**
+
+- [ ] **Verify control plane:** `istioctl version` shows new version
+- [ ] **Check pod status:** `kubectl get pods -n istio-system`
+- [ ] **Verify VirtualService:** `kubectl get virtualservice -A`
+- [ ] **Verify Gateway:** `kubectl get gateway -A`
+- [ ] **Test traffic routing:** Verify services are accessible
+- [ ] **Check sidecar proxies:** Verify sidecars are updated
+- [ ] **Monitor metrics:** Check Istio metrics for errors
+- [ ] **Test critical paths:** Test main application flows
+
+---
+
+## Summary
+
+**Istio Upgrade Process in exotel_deployments:**
+
+1. **Upgrade Control Plane** (Helm/istioctl)
+   - Upgrade istiod, istio-ingressgateway
+   - Time: ~10-20 minutes
+
+2. **Update Istio Manifests** (exotel_deployments)
+   - Update VirtualService, Gateway, DestinationRule
+   - Update API versions if needed
+   - Update deprecated fields
+
+3. **Update Service Manifests** (exotel_deployments)
+   - Update sidecar injection annotations
+   - Update service labels if needed
+
+4. **Commit and Push** (exotel_deployments)
+   - git add, commit, push
+   - ArgoCD detects changes
+
+5. **ArgoCD Syncs** (Automatic)
+   - Applies updated Istio manifests
+   - Updates Kubernetes resources
+
+**Key Points:**
+- ✅ Control plane upgrade done via Helm/istioctl
+- ✅ Manifest updates done in `exotel_deployments` repository
+- ✅ ArgoCD automatically applies changes
+- ✅ Always test in non-production first
+- ✅ Check Istio release notes for breaking changes
+
+That's the complete Istio upgrade process in exotel_deployments! 🚀
+
