@@ -1,0 +1,523 @@
+# Kubernetes/EKS Upgrade Process
+
+## Overview
+
+**Upgrade Process:** EKS (Elastic Kubernetes Service) cluster upgrade  
+**Method:** AWS Console (UI) for all steps except AMI creation  
+**AMI Creation:** Uses `infra_code/ami-creation/` code (Packer)
+
+---
+
+## Complete Upgrade Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    EKS CLUSTER UPGRADE                        │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 1: Core-Addons Upgrade (AWS Console)                    │
+│    - Upgrade EKS add-ons (CoreDNS, kube-proxy, VPC CNI, etc.) │
+│    - Done via AWS Console → EKS → Add-ons                    │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 2: Create New AMI (ami-creation code)                    │
+│    - Run: make integration-eks (or mum-eks, sgp-eks)         │
+│    - Creates AMI with new Kubernetes version                 │
+│    - AMI name: exotel-cpu-ami-{BUILD_NUMBER}-eks             │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 3: Worker Node Upgrade (AWS Console)                    │
+│    - Update Node Group → Launch Template → Use new AMI       │
+│    - Rolling update of worker nodes                          │
+│    - AWS handles node replacement automatically               │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Step 4: Master Node Upgrade (AWS Console)                     │
+│    - Upgrade EKS Control Plane (API server, etcd, etc.)      │
+│    - Done via AWS Console → EKS → Cluster → Update           │
+│    - AWS manages master nodes (fully managed)                 │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Result: Cluster Upgraded to New Kubernetes Version           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Step-by-Step Process
+
+### Step 1: Core-Addons Upgrade (AWS Console)
+
+**What are Core-Addons?**
+- **CoreDNS:** DNS server for Kubernetes
+- **kube-proxy:** Network proxy for services
+- **VPC CNI:** Container networking interface
+- **EBS CSI Driver:** Storage driver
+- **Other add-ons:** Metrics server, etc.
+
+**Why upgrade first?**
+- Add-ons must be compatible with new Kubernetes version
+- Ensures networking/storage works after upgrade
+- Prevents compatibility issues
+
+**How to do it (AWS Console):**
+
+1. **Navigate to EKS:**
+   - AWS Console → **EKS** → **Clusters**
+   - Select your cluster (e.g., `integration`, `mum`, `sgp`)
+
+2. **Go to Add-ons:**
+   - Click on your cluster
+   - Go to **Add-ons** tab
+
+3. **Upgrade each add-on:**
+   - Select an add-on (e.g., CoreDNS)
+   - Click **Update**
+   - Select new version compatible with target Kubernetes version
+   - Click **Update**
+
+4. **Repeat for all add-ons:**
+   - CoreDNS
+   - kube-proxy
+   - VPC CNI
+   - EBS CSI Driver
+   - Any other add-ons
+
+**Expected time:** 5-10 minutes per add-on
+
+---
+
+### Step 2: Create New AMI (ami-creation code)
+
+**Why create new AMI?**
+- Worker nodes need AMI with new Kubernetes version
+- AMI must match EKS node requirements
+- Includes all necessary tools and configurations
+
+**How to do it:**
+
+#### **Option 1: Using Makefile (Recommended)**
+
+```bash
+# Navigate to ami-creation directory
+cd infra_code/ami-creation
+
+# For Integration environment
+make integration-eks
+
+# For Mumbai environment
+make mum-eks
+
+# For Singapore environment
+make sgp-eks
+
+# For Ireland environment
+make ireland-eks
+```
+
+#### **Option 2: Using build-ami.sh directly**
+
+```bash
+cd infra_code/ami-creation
+
+# Integration example
+AWS_REGION=us-west-2 ./build-ami.sh \
+  -c integration \
+  -v vpc_us3-requestor \
+  -e qa \
+  -s bastion-us3-private-us-west-2b \
+  -r qa_ec2_role \
+  -t "exotel-integration-eks-usw2.json"
+```
+
+**What happens:**
+1. Packer finds base EKS AMI (e.g., `amazon-eks-node-al2023-x86_64-standard-1.29-v20251023`)
+2. Launches temporary instance (t2.micro)
+3. Runs provisioning scripts:
+   - Initial setup (init scripts)
+   - Management setup (packages, wazuh, image-pull)
+4. Creates AMI: `exotel-cpu-ami-{BUILD_NUMBER}-eks`
+5. Terminates temporary instance
+
+**Expected time:** 15-30 minutes
+
+**Important:** Note the AMI ID after creation (you'll need it in Step 3)
+
+---
+
+### Step 3: Worker Node Upgrade (AWS Console)
+
+**What are Worker Nodes?**
+- EC2 instances that run your pods
+- Managed by EKS Node Groups
+- Need to be replaced with new AMI
+
+**How to do it (AWS Console):**
+
+#### **3.1 Update Node Group Launch Template**
+
+1. **Navigate to EKS:**
+   - AWS Console → **EKS** → **Clusters**
+   - Select your cluster
+
+2. **Go to Compute:**
+   - Click **Compute** tab
+   - Find your Node Group (e.g., `integration-workers`, `mum-workers`)
+
+3. **Update Node Group:**
+   - Select the Node Group
+   - Click **Update**
+   - Go to **Launch template** section
+
+4. **Update AMI:**
+   - Select **Use custom AMI**
+   - Enter the AMI ID from Step 2 (e.g., `ami-0a1b2c3d4e5f6g7h8`)
+   - Or select from **Recent AMIs** if it appears
+
+5. **Update Kubernetes Version:**
+   - Set **Kubernetes version** to target version (e.g., `1.29`)
+   - This must match the EKS cluster version
+
+6. **Review and Update:**
+   - Review all settings
+   - Click **Update**
+
+#### **3.2 Rolling Update Process**
+
+**What AWS does automatically:**
+1. **Cordons old nodes:** Marks them as unschedulable
+2. **Drains pods:** Gracefully moves pods to new nodes
+3. **Launches new nodes:** Creates new instances with new AMI
+4. **Terminates old nodes:** Removes old instances after pods are moved
+5. **Repeats:** Does this for each node in the group
+
+**Expected time:** 10-20 minutes per node (depends on node count)
+
+**Monitoring:**
+- Watch node status in **Compute** tab
+- Check pod status: `kubectl get pods -A`
+- Verify nodes: `kubectl get nodes`
+
+---
+
+### Step 4: Master Node (Control Plane) Upgrade (AWS Console)
+
+**What is the Control Plane?**
+- **API Server:** Kubernetes API endpoint
+- **etcd:** Cluster state database
+- **Scheduler:** Pod scheduling logic
+- **Controller Manager:** Cluster controllers
+
+**Important:** In EKS, the control plane is **fully managed by AWS**. You don't manage master nodes directly.
+
+**How to do it (AWS Console):**
+
+1. **Navigate to EKS:**
+   - AWS Console → **EKS** → **Clusters**
+   - Select your cluster
+
+2. **Go to Overview:**
+   - Click on your cluster
+   - Go to **Overview** tab
+
+3. **Update Cluster:**
+   - Click **Update** button (next to Kubernetes version)
+   - Select target Kubernetes version (e.g., `1.29`)
+   - Review changes
+
+4. **Confirm Update:**
+   - Click **Update**
+   - AWS will upgrade the control plane
+
+**What AWS does:**
+1. **Backs up etcd:** Takes snapshot of cluster state
+2. **Upgrades API Server:** Updates to new version
+3. **Upgrades etcd:** Updates database version
+4. **Upgrades Scheduler/Controllers:** Updates all components
+5. **Verifies:** Ensures cluster is healthy
+
+**Expected time:** 15-30 minutes
+
+**Important Notes:**
+- **No downtime:** AWS performs rolling upgrade
+- **API may be briefly unavailable:** During upgrade window
+- **Pods continue running:** Worker nodes unaffected during control plane upgrade
+
+---
+
+## Upgrade Order (Critical!)
+
+**⚠️ MUST follow this order:**
+
+```
+1. Core-Addons Upgrade
+   ↓
+2. Create New AMI (with new Kubernetes version)
+   ↓
+3. Worker Node Upgrade (using new AMI)
+   ↓
+4. Master Node (Control Plane) Upgrade
+```
+
+**Why this order?**
+
+1. **Core-Addons first:** Ensures compatibility before upgrading nodes
+2. **AMI creation:** Must be done before worker node upgrade (needs the AMI)
+3. **Worker nodes before master:** 
+   - Workers can run on old control plane temporarily
+   - Ensures worker nodes are ready before control plane upgrade
+   - Allows testing worker nodes with new version
+4. **Master last:** 
+   - Control plane upgrade is the final step
+   - All components must be ready before upgrading control plane
+
+---
+
+## Example: Upgrading from Kubernetes 1.28 to 1.29
+
+### **Step 1: Upgrade Core-Addons**
+
+**AWS Console:**
+```
+EKS → Clusters → integration → Add-ons
+→ Update CoreDNS (1.28 → 1.29 compatible version)
+→ Update kube-proxy (1.28 → 1.29 compatible version)
+→ Update VPC CNI (1.28 → 1.29 compatible version)
+```
+
+**Time:** ~20-30 minutes
+
+---
+
+### **Step 2: Create New AMI**
+
+**Terminal:**
+```bash
+cd infra_code/ami-creation
+make integration-eks
+```
+
+**Output:**
+```
+AMI created: exotel-cpu-ami-1735123456-eks
+AMI ID: ami-0a1b2c3d4e5f6g7h8
+```
+
+**Time:** ~20-30 minutes
+
+---
+
+### **Step 3: Upgrade Worker Nodes**
+
+**AWS Console:**
+```
+EKS → Clusters → integration → Compute
+→ Select Node Group: integration-workers
+→ Update
+→ Launch template → Use custom AMI: ami-0a1b2c3d4e5f6g7h8
+→ Kubernetes version: 1.29
+→ Update
+```
+
+**AWS automatically:**
+- Cordons old nodes
+- Drains pods
+- Launches new nodes with new AMI
+- Terminates old nodes
+
+**Time:** ~30-60 minutes (depends on node count)
+
+---
+
+### **Step 4: Upgrade Control Plane**
+
+**AWS Console:**
+```
+EKS → Clusters → integration → Overview
+→ Update (next to Kubernetes version)
+→ Select version: 1.29
+→ Update
+```
+
+**AWS automatically:**
+- Backs up etcd
+- Upgrades API Server
+- Upgrades etcd
+- Upgrades Scheduler/Controllers
+
+**Time:** ~15-30 minutes
+
+---
+
+## Verification After Upgrade
+
+### **1. Check Cluster Version**
+
+```bash
+kubectl version --short
+```
+
+**Expected:**
+```
+Client Version: v1.29.x
+Server Version: v1.29.x
+```
+
+### **2. Check Node Versions**
+
+```bash
+kubectl get nodes -o wide
+```
+
+**Expected:**
+- All nodes show Kubernetes version 1.29
+- All nodes are `Ready`
+
+### **3. Check Pod Status**
+
+```bash
+kubectl get pods -A
+```
+
+**Expected:**
+- All pods are `Running` or `Completed`
+- No pods stuck in `Pending` or `Error`
+
+### **4. Check Add-on Versions**
+
+**AWS Console:**
+```
+EKS → Clusters → integration → Add-ons
+```
+
+**Expected:**
+- All add-ons show updated versions
+- All add-ons are `Active`
+
+---
+
+## Rollback Plan
+
+### **If Upgrade Fails:**
+
+#### **Worker Node Rollback:**
+1. **AWS Console:**
+   - EKS → Clusters → {cluster} → Compute
+   - Select Node Group
+   - Click **Update**
+   - Revert to previous AMI ID
+   - Revert Kubernetes version
+
+#### **Control Plane Rollback:**
+1. **AWS Console:**
+   - EKS → Clusters → {cluster} → Overview
+   - Click **Update**
+   - Select previous Kubernetes version
+   - **Note:** Rollback may take time, AWS needs to restore from backup
+
+#### **Add-on Rollback:**
+1. **AWS Console:**
+   - EKS → Clusters → {cluster} → Add-ons
+   - Select add-on
+   - Click **Update**
+   - Select previous version
+
+---
+
+## Important Notes
+
+### **1. AMI Version Compatibility**
+
+**The AMI must match:**
+- **Kubernetes version:** Must match target EKS version
+- **EKS node AMI:** Must be based on official EKS node AMI
+- **Region:** AMI must be in same region as cluster
+
+**Example:**
+- EKS Cluster: `1.29` in `us-west-2`
+- AMI must be: Based on `amazon-eks-node-al2023-x86_64-standard-1.29-*`
+- AMI must be in: `us-west-2` region
+
+---
+
+### **2. Downtime Considerations**
+
+**Minimal Downtime:**
+- **Core-Addons:** Usually no downtime
+- **Worker Nodes:** Rolling update (pods moved gracefully)
+- **Control Plane:** Brief API unavailability (seconds to minutes)
+
+**Best Practice:**
+- Schedule during maintenance window
+- Upgrade during low-traffic periods
+- Have rollback plan ready
+
+---
+
+### **3. Pre-Upgrade Checklist**
+
+**Before starting upgrade:**
+
+- [ ] **Backup etcd:** AWS does this automatically, but verify
+- [ ] **Check add-on compatibility:** Ensure add-ons support new Kubernetes version
+- [ ] **Review breaking changes:** Check Kubernetes release notes
+- [ ] **Test in non-production:** Test upgrade process in QA/Integration first
+- [ ] **Document AMI ID:** Note the AMI ID after creation
+- [ ] **Verify node group capacity:** Ensure enough capacity for rolling update
+- [ ] **Check pod disruption budgets:** Ensure PDBs allow node replacement
+
+---
+
+### **4. Post-Upgrade Checklist**
+
+**After upgrade completes:**
+
+- [ ] **Verify cluster version:** `kubectl version`
+- [ ] **Verify node versions:** `kubectl get nodes`
+- [ ] **Check pod status:** `kubectl get pods -A`
+- [ ] **Test critical workloads:** Verify applications work correctly
+- [ ] **Check add-on status:** Verify all add-ons are active
+- [ ] **Monitor metrics:** Check cluster metrics for issues
+- [ ] **Update documentation:** Document new versions
+
+---
+
+## Summary
+
+**Complete EKS Upgrade Process:**
+
+1. **Core-Addons Upgrade** (AWS Console)
+   - Upgrade all EKS add-ons to new version
+   - Time: ~20-30 minutes
+
+2. **Create New AMI** (ami-creation code)
+   - Run `make {env}-eks` or `build-ami.sh`
+   - Creates AMI with new Kubernetes version
+   - Time: ~20-30 minutes
+
+3. **Worker Node Upgrade** (AWS Console)
+   - Update Node Group with new AMI
+   - Rolling update of worker nodes
+   - Time: ~30-60 minutes
+
+4. **Master Node Upgrade** (AWS Console)
+   - Upgrade EKS Control Plane
+   - AWS manages this automatically
+   - Time: ~15-30 minutes
+
+**Total Time:** ~2-3 hours (depending on cluster size)
+
+**Key Points:**
+- ✅ All steps done via AWS Console except AMI creation
+- ✅ AMI creation uses `infra_code/ami-creation/` code
+- ✅ Follow exact order: Add-ons → AMI → Workers → Master
+- ✅ Rolling updates minimize downtime
+- ✅ AWS handles most of the complexity
+
+That's the complete Kubernetes/EKS upgrade process! 🚀
+
