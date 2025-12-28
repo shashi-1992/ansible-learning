@@ -1,0 +1,494 @@
+# AMI Creation Process - infra_code Repository
+
+## Overview
+
+**Repository:** `infra_code/ami-creation/`  
+**Tool:** **Packer** (HashiCorp's AMI creation tool)  
+**Purpose:** Create standardized AMIs for EKS (Elastic Kubernetes Service) and EC2 instances
+
+---
+
+## Repository Structure
+
+```
+infra_code/ami-creation/
+├── build-ami.sh                    # Main build script
+├── Makefile                        # Make targets for different environments
+├── README.md                       # Quick usage guide
+├── Packer.mermaid                  # Visual flow diagram
+├── Makefile.mermaid                # Makefile flow diagram
+│
+├── exotel-integration-eks-usw2.json    # Packer template for Integration EKS
+├── exotel-integration-usw2.json         # Packer template for Integration EC2
+├── exotel-ireland-eks-euw1.json         # Packer template for Ireland EKS
+├── exotel-mum-aps1.json                 # Packer template for Mumbai EC2
+├── exotel-mum-eks-aps1.json            # Packer template for Mumbai EKS
+├── exotel-sgp-apse1.json               # Packer template for Singapore EC2
+└── exotel-sgp-eks-apse1.json           # Packer template for Singapore EKS
+│
+└── scripts/                        # Provisioning scripts
+    ├── init/                       # Initial setup scripts
+    │   ├── init.sh                 # Initial system setup
+    │   ├── setup.sh                # Environment-specific setup
+    │   ├── set-facts.sh            # Set system facts
+    │   ├── functions.sh            # Helper functions
+    │   ├── env/                    # Environment variables
+    │   │   ├── qa.env
+    │   │   ├── prod.env
+    │   │   ├── mum.env
+    │   │   └── ireland.env
+    │   ├── files/                  # Configuration files
+    │   │   ├── bashrc
+    │   │   ├── sshconfig
+    │   │   ├── sshd_config
+    │   │   ├── tmux.conf
+    │   │   ├── vimrc
+    │   │   ├── awsm                # AWS management tool
+    │   │   └── ross                # ROSS tool
+    │   └── tmpl/                   # Templates
+    │       ├── aws.config.tpl
+    │       └── resolv.conf.tmpl
+    │
+    ├── management/                 # Management scripts
+    │   ├── init.sh                 # Management initialization
+    │   ├── setup.sh                # Management setup
+    │   ├── packages.sh             # Install packages
+    │   ├── reloads.sh              # Reload services
+    │   ├── image-pull.sh           # Pre-pull container images
+    │   ├── wazuh-installation.sh   # Security monitoring
+    │   └── files/                   # Management files
+    │       ├── key-sync.service     # SSH key sync service
+    │       ├── vim-cleanup.service # Vim cleanup service
+    │       ├── heimdall             # Monitoring tool
+    │       └── configuration        # Config files
+    │
+    ├── cis/                        # CIS (Center for Internet Security) hardening
+    │   ├── hardening.sh           # Security hardening script
+    │   └── files/                  # CIS configuration files
+    │       ├── cis-sysctl.conf
+    │       ├── cis-limits.conf
+    │       ├── sshd_config
+    │       └── ssh_banner
+    │
+    └── tests/                      # Testing scripts
+        └── cis-reporting/
+            └── script.sh
+```
+
+---
+
+## How It Works
+
+### 1. **Packer-Based AMI Creation**
+
+**What is Packer?**
+- HashiCorp's tool for creating machine images
+- Supports multiple platforms (AWS, Azure, GCP, etc.)
+- Uses JSON templates to define AMI creation process
+- Automates instance launch, configuration, and AMI creation
+
+**Key Difference from Ansible Approach:**
+- **Ansible (getafix):** Manual instance creation → Configure → Create AMI
+- **Packer (infra_code):** Automated end-to-end process in one command
+
+---
+
+### 2. **Packer Template Structure**
+
+**File:** `exotel-integration-eks-usw2.json`
+
+#### **Variables Section**
+```json
+{
+  "variables": {
+    "region": "us-west-2",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  }
+}
+```
+
+**What this does:**
+- Defines variables used throughout the template
+- Values come from environment variables or command-line
+- `BUILD_NUMBER` is a timestamp (from `build-ami.sh`)
+
+---
+
+#### **Builders Section**
+```json
+{
+  "builders": [{
+    "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks",
+    "instance_type": "t2.micro",
+    "region": "{{user `region`}}",
+    "source_ami_filter": {
+      "filters": {
+        "name": "amazon-eks-node-al2023-x86_64-standard-1.29-v20251023",
+        "virtualization-type": "hvm",
+        "root-device-type": "ebs"
+      },
+      "owners": ["602401143452"],
+      "most_recent": true
+    },
+    "vpc_filter": {
+      "filters": {
+        "tag:Name": "{{user `vpc_name`}}",
+        "tag:env": "{{ user `environment` }}"
+      }
+    },
+    "subnet_filter": {
+      "filters": {
+        "tag:Name": "{{user `subnet_name`}}"
+      },
+      "most_free": true
+    },
+    "encrypt_boot": true,
+    "ssh_username": "ec2-user"
+  }]
+}
+```
+
+**What this does:**
+- **`ami_name`:** Name of the AMI to create (includes build number)
+- **`instance_type`:** EC2 instance type for building (t2.micro - minimal cost)
+- **`source_ami_filter`:** Finds the base AMI to start from
+  - EKS node AMI: `amazon-eks-node-al2023-x86_64-standard-1.29-v20251023`
+  - Owner: `602401143452` (AWS EKS account)
+  - Uses most recent matching AMI
+- **`vpc_filter`:** Finds VPC by name and environment tag
+- **`subnet_filter`:** Finds subnet by name, picks one with most free IPs
+- **`encrypt_boot`:** Encrypts the root volume
+- **`ssh_username`:** User for SSH access (ec2-user for Amazon Linux)
+
+---
+
+#### **Provisioners Section**
+```json
+{
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": ["ENVIRONMENT={{user `environment`}}"]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh; sudo bash image-pull.sh",
+      "environment_vars": ["ENVIRONMENT={{user `environment`}}"]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts"
+    }
+  ]
+}
+```
+
+**What this does:**
+1. **Wait for cloud-init:** Ensures instance is fully initialized
+2. **Copy scripts:** Uploads all scripts from `./scripts` to `/tmp/scripts` on instance
+3. **Run init scripts:**
+   - `init.sh` - Initial system setup
+   - `setup.sh` - Environment-specific configuration
+   - `set-facts.sh` - Set system facts/variables
+4. **Run management scripts:**
+   - `init.sh` - Management initialization
+   - `setup.sh` - Management setup
+   - `reloads.sh` - Reload system services
+   - `packages.sh` - Install required packages
+   - `wazuh-installation.sh` - Install security monitoring
+   - `image-pull.sh` - Pre-pull container images (for EKS)
+5. **Cleanup:** Removes temporary scripts
+
+---
+
+### 3. **Build Script**
+
+**File:** `build-ami.sh`
+
+**What it does:**
+1. Sets `BUILD_NUMBER` to current timestamp
+2. Handles debug mode (adds `-debug` flag if `DEBUG` env var is set)
+3. Validates required parameters:
+   - `-c` Cluster name
+   - `-v` VPC name
+   - `-e` Environment
+   - `-s` Subnet name
+   - `-r` IAM role for Packer instance
+   - `-t` Packer template file
+4. Runs `packer init` to initialize Packer
+5. Runs `packer build` with variables
+
+**Example usage:**
+```bash
+AWS_REGION=us-west-2 ./build-ami.sh \
+  -c integration \
+  -v vpc_us3-requestor \
+  -e qa \
+  -s bastion-us3-private-us-west-2b \
+  -r qa_ec2_role \
+  -t "exotel-integration-eks-usw2.json"
+```
+
+---
+
+### 4. **Makefile Targets**
+
+**File:** `Makefile`
+
+**Available targets:**
+
+#### **Installation Targets:**
+- `packer` - Checks if Packer is installed, installs if missing
+- `awsm` - Copies AWSM and ROSS tools to scripts directory
+- `install-packer` - Downloads and installs Packer 1.11.2
+- `install-awsm` - Copies AWSM from `../scripts/awsm/`
+
+#### **AMI Creation Targets:**
+
+**EKS AMIs:**
+- `mum-eks` - Creates Mumbai EKS AMI
+- `sgp-eks` - Creates Singapore EKS AMI
+- `integration-eks` - Creates Integration EKS AMI
+- `ireland-eks` - Creates Ireland EKS AMI
+
+**EC2 AMIs:**
+- `mum` - Creates Mumbai EC2 AMI
+- `sgp` - Creates Singapore EC2 AMI
+- `integration` - Creates Integration EC2 AMI
+
+**Usage:**
+```bash
+make mum-eks        # Create Mumbai EKS AMI
+make sgp-eks        # Create Singapore EKS AMI
+make integration-eks # Create Integration EKS AMI
+```
+
+**Note:** These commands must be run on the individual stamp's servers (Mumbai, Singapore, etc.) because they launch EC2 instances in those regions.
+
+---
+
+## Complete AMI Creation Flow
+
+```
+1. Run Make Target (e.g., `make integration-eks`)
+   ↓
+2. Makefile checks for Packer and AWSM
+   - If missing, installs them
+   ↓
+3. Makefile calls build-ami.sh with parameters
+   ↓
+4. build-ami.sh sets BUILD_NUMBER and validates parameters
+   ↓
+5. Packer init initializes Packer
+   ↓
+6. Packer build starts:
+   a. Finds base AMI (EKS node AMI)
+   b. Finds VPC by name and environment tag
+   c. Finds subnet by name
+   d. Launches temporary EC2 instance (t2.micro)
+   e. Waits for cloud-init
+   ↓
+7. Provisioning Phase:
+   a. Uploads scripts to /tmp/scripts
+   b. Runs init scripts (init.sh, setup.sh, set-facts.sh)
+   c. Runs management scripts (packages, wazuh, image-pull)
+   d. Cleans up /tmp/scripts
+   ↓
+8. Packer creates AMI from configured instance
+   ↓
+9. Packer terminates temporary instance
+   ↓
+10. AMI is ready with name: exotel-cpu-ami-{BUILD_NUMBER}-eks
+```
+
+---
+
+## Key Scripts Explained
+
+### **Init Scripts** (`scripts/init/`)
+
+#### **`init.sh`**
+- Initial system setup
+- Creates directories
+- Sets up basic environment
+
+#### **`setup.sh`**
+- Environment-specific configuration
+- Uses environment files from `env/` directory
+- Configures system based on environment (qa, prod, mum, ireland)
+
+#### **`set-facts.sh`**
+- Sets system facts/variables
+- Configures hostname, domain, etc.
+
+#### **`functions.sh`**
+- Helper functions used by other scripts
+- Common utilities
+
+---
+
+### **Management Scripts** (`scripts/management/`)
+
+#### **`packages.sh`**
+- Installs required system packages
+- Updates package lists
+- Installs tools needed for EKS/EC2
+
+#### **`reloads.sh`**
+- Reloads system services
+- Restarts services with new configurations
+
+#### **`wazuh-installation.sh`**
+- Installs Wazuh security monitoring agent
+- Configures security monitoring
+
+#### **`image-pull.sh`**
+- Pre-pulls container images for EKS
+- Reduces startup time for pods
+- Pulls common base images
+
+---
+
+### **CIS Hardening** (`scripts/cis/`)
+
+#### **`hardening.sh`**
+- Applies CIS (Center for Internet Security) benchmarks
+- Security hardening configurations
+- System security best practices
+
+---
+
+## Environment-Specific Templates
+
+### **EKS Templates:**
+- `exotel-integration-eks-usw2.json` - Integration EKS (US West 2)
+- `exotel-mum-eks-aps1.json` - Mumbai EKS (AP South 1)
+- `exotel-sgp-eks-apse1.json` - Singapore EKS (AP Southeast 1)
+- `exotel-ireland-eks-euw1.json` - Ireland EKS (EU West 1)
+
+### **EC2 Templates:**
+- `exotel-integration-usw2.json` - Integration EC2 (US West 2)
+- `exotel-mum-aps1.json` - Mumbai EC2 (AP South 1)
+- `exotel-sgp-apse1.json` - Singapore EC2 (AP Southeast 1)
+
+**Key Differences:**
+- **EKS templates:** Start from EKS node AMI, include `image-pull.sh` for container images
+- **EC2 templates:** Start from standard Amazon Linux AMI, no container image pre-pull
+
+---
+
+## Required Parameters
+
+### **For build-ami.sh:**
+- `-c` **Cluster:** Cluster name (integration, mum, sgp, ireland)
+- `-v` **VPC Name:** VPC name to use (e.g., `vpc_us3-requestor`, `vpc-mum`)
+- `-e` **Environment:** Environment name (qa, prod, mum, ireland)
+- `-s` **Subnet:** Subnet name (e.g., `bastion-us3-private-us-west-2b`)
+- `-r` **IAM Role:** IAM role for Packer instance (e.g., `qa_ec2_role`)
+- `-t` **Template:** Packer template JSON file
+
+### **Environment Variables:**
+- `AWS_REGION` - AWS region (us-west-2, ap-south-1, ap-southeast-1, eu-west-1)
+- `DEBUG` - Set to enable debug mode (adds `-debug` flag)
+
+---
+
+## Example: Creating Integration EKS AMI
+
+```bash
+# Navigate to ami-creation directory
+cd infra_code/ami-creation
+
+# Option 1: Using Makefile
+make integration-eks
+
+# Option 2: Using build-ami.sh directly
+AWS_REGION=us-west-2 ./build-ami.sh \
+  -c integration \
+  -v vpc_us3-requestor \
+  -e qa \
+  -s bastion-us3-private-us-west-2b \
+  -r qa_ec2_role \
+  -t "exotel-integration-eks-usw2.json"
+```
+
+**What happens:**
+1. Packer finds base EKS AMI: `amazon-eks-node-al2023-x86_64-standard-1.29-v20251023`
+2. Launches t2.micro instance in `vpc_us3-requestor`, subnet `bastion-us3-private-us-west-2b`
+3. Runs all provisioning scripts
+4. Creates AMI: `exotel-cpu-ami-{timestamp}-eks`
+5. Terminates temporary instance
+
+---
+
+## Comparison: Packer vs Ansible Approach
+
+### **Packer (infra_code):**
+✅ **Pros:**
+- Fully automated (one command)
+- No manual instance management
+- Built-in cleanup (terminates instance automatically)
+- Standardized process
+- Better for CI/CD integration
+
+❌ **Cons:**
+- Requires Packer installation
+- Less flexible for complex multi-step processes
+- Limited to what Packer supports
+
+### **Ansible (getafix):**
+✅ **Pros:**
+- More flexible
+- Can do complex multi-phase operations
+- Better for existing infrastructure
+- Can reuse existing Ansible roles
+
+❌ **Cons:**
+- Manual instance management
+- More steps involved
+- Requires manual cleanup
+
+---
+
+## Summary
+
+**Repository:** `infra_code/ami-creation/`  
+**Tool:** Packer (HashiCorp)  
+**Process:**
+1. Define Packer template (JSON)
+2. Run `make {target}` or `build-ami.sh`
+3. Packer launches instance, configures it, creates AMI
+4. AMI ready with name: `exotel-cpu-ami-{BUILD_NUMBER}-eks`
+
+**Key Features:**
+- Automated end-to-end AMI creation
+- Environment-specific templates
+- EKS and EC2 support
+- Security hardening (CIS)
+- Pre-pulls container images for EKS
+- Encrypted boot volumes
+
+**Usage:**
+```bash
+make integration-eks  # Create Integration EKS AMI
+make mum-eks         # Create Mumbai EKS AMI
+make sgp-eks         # Create Singapore EKS AMI
+```
+
+That's the complete AMI creation process in `infra_code`! 🚀
+
