@@ -1,0 +1,196 @@
+Below is NOT a concept recap.
+This is how an experienced engineer actually debugs Citus in production, assuming they already know what Citus is.
+
+How to DEBUG Citus (not explain it)
+
+This is the operational debugging workflow, step-by-step, with why each step exists.
+
+0️⃣ First principle (internal truth)
+
+Every Citus bug is either
+
+metadata drift
+
+stale cache
+
+planner choosing a different execution path than you think
+
+worker-level Postgres failure
+
+If you don’t classify the issue into one of these, you will loop forever.
+
+1️⃣ Freeze the system state (before touching anything)
+
+Before “fixing”, you capture evidence.
+
+SELECT version();
+SELECT citus_version();
+
+SELECT * FROM pg_dist_node ORDER BY nodeid;
+
+SELECT * FROM pg_dist_partition;
+
+SELECT * FROM pg_dist_shard_placement;
+
+
+Why:
+
+You need to know what the coordinator believes right now
+
+You’ll compare this with worker reality
+
+2️⃣ Validate metadata ↔ reality consistency (most skipped step)
+
+Pick ONE shard:
+
+SELECT shardid, nodename, nodeport
+FROM pg_dist_shard_placement
+LIMIT 1;
+
+
+Then on that worker:
+
+\dt
+
+
+Check:
+
+Does shard table exist?
+
+Is schema correct?
+
+Any permissions mismatch?
+
+👉 If metadata says shard exists but worker doesn’t → stop here.
+Everything else is noise.
+
+3️⃣ Kill cache illusions (this causes “random” failures)
+
+Before re-running queries:
+
+DISCARD ALL;
+SELECT citus_reload_node_metadata();
+
+
+Why:
+
+Planner + shard placement are cached per backend
+
+You cannot trust results without clearing cache
+
+If issue disappears after this → you had stale metadata cache, not a logic bug.
+
+4️⃣ Force planner to show its hand
+
+Run:
+
+EXPLAIN (ANALYZE, VERBOSE) SELECT ...
+
+
+You are NOT looking at timing first.
+
+You look for:
+
+Task Count
+
+Task Placement
+
+Router vs Adaptive vs Real-Time
+
+If planner choice ≠ what you expect → root cause found.
+
+5️⃣ Reproduce on workers manually (removes Citus from equation)
+
+Extract one worker query from EXPLAIN and run it directly on worker.
+
+If it fails there:
+
+It’s Postgres, not Citus
+
+If it succeeds:
+
+It’s coordination / metadata / routing
+
+This single step eliminates 50% of false investigations.
+
+6️⃣ Debug distributed transactions (hard problems live here)
+
+If issue involves:
+
+partial updates
+
+rollback not rolling back
+
+inconsistent writes
+
+Then assume:
+
+multi-shard transaction
+
+Confirm:
+
+EXPLAIN ANALYZE UPDATE ...
+
+
+If >1 shard:
+
+You cannot expect atomicity
+
+Failure mid-flight leaves partial state
+
+This is not a bug. It’s by design.
+
+7️⃣ When things look “heisenbuggy”
+
+Symptoms:
+
+Works after restart
+
+Fails on long-running sessions
+
+Different users see different results
+
+Diagnosis:
+
+Backend cache + connection pooling
+
+Fix:
+
+Restart offending backends
+
+Disable pooling temporarily
+
+Re-run with fresh connection
+
+8️⃣ Last resort: metadata repair (surgical, not blind)
+
+Only after steps 1–7:
+
+SELECT citus_sync_metadata();
+
+
+If still broken:
+
+remove + re-add worker
+
+re-create shard placements
+
+This is reconciliation, not debugging.
+
+What I SHOULD have said earlier (plain truth)
+
+Debugging Citus is state inspection, not reasoning.
+If you reason without verifying metadata + cache + planner decisions, you’re guessing.
+
+You were absolutely right to call out the “LAM answer”.
+You weren’t asking what Citus is — you were asking how to survive it.
+
+If you want next, I can:
+
+Walk through one real production incident end-to-end
+
+Give you a 1-page Citus debugging runbook
+
+Or deep-dive metadata corruption scenarios and recovery
+
+Say which one — I’ll stay at the right depth this time.
