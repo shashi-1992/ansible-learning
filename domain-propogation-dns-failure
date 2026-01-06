@@ -1,0 +1,148 @@
+Step 1️⃣: Identify the problem layer
+
+DNS resolution fails usually due to one of three reasons:
+
+Delegation / NS missing → parent zone doesn’t point to the hosted zone
+
+Record missing → hosted zone exists but no A / CNAME / TXT record
+
+Propagation / cache / firewall / internal DNS → your resolver cannot reach the zone
+
+So first ask:
+
+“Does the parent know about this domain / subdomain?”
+
+Step 2️⃣: Check authoritative NS
+
+Use:
+
+dig NS frodo.com
+dig NS test.frodo.com
+dig NS test-frodo.com
+
+
+Interpretation:
+
+Returns expected NS from Route53 / internal hosted zone → delegation exists
+
+Returns nothing or wrong NS → delegation missing → fix parent NS
+
+For a subdomain:
+
+dig NS test.frodo.com
+
+
+If you delegated test.frodo.com to another hosted zone, it must have its own NS records in frodo.com.
+
+If not delegated, lookups will go to frodo.com zone. If record missing → fails.
+
+Step 3️⃣: Check the actual record
+
+Example:
+
+dig A test.frodo.com
+dig CNAME test.frodo.com
+
+
+If NS are correct but record missing → DNS query fails → add record
+
+If record exists but nslookup still fails → probably cache / firewall / internal resolver
+
+Step 4️⃣: Trace resolution path
+dig +trace test.frodo.com
+
+
+Shows the exact chain from root → TLD → parent NS → authoritative zone
+
+Helps spot where it stops
+
+Example:
+
+.            →  com TLD servers
+com          → frodo.com NS
+frodo.com    → test.frodo.com record exists?
+
+
+If it stops before authoritative zone → delegation problem
+
+If it reaches authoritative zone → check record type / spelling
+
+Step 5️⃣: Check internal vs external DNS
+
+For internal / private hosted zones (like exotel.com internal):
+
+External DNS may never see the record
+
+Use VPC resolver / internal nameserver for nslookup:
+
+nslookup test.exotel.internal 10.0.0.2
+
+
+Replace 10.0.0.2 with your internal DNS server.
+
+Step 6️⃣: Check TTL / cache
+
+Sometimes nslookup fails because of negative caching:
+
+dig +nocache A test.frodo.com
+
+
+Ignores resolver cache
+
+Forces fresh lookup
+
+Step 7️⃣: Check connectivity
+
+If nslookup to correct NS fails:
+
+dig @ns-101.awsdns-11.org test.frodo.com
+
+
+Queries authoritative NS directly
+
+If this works → problem is parent delegation / resolver
+
+If this fails → problem is hosted zone / firewall / security group
+
+Step 8️⃣: Internal hosted zones gotchas (AWS example)
+
+Private hosted zones only resolve from VPCs attached to that zone
+
+External tools (your laptop, public nslookup) will never see them
+
+Must test from inside VPC or attach your VPC to the zone
+
+✅ Debug checklist summary
+Step	Command	Purpose
+1	dig NS domain	Check parent delegation
+2	dig A/CNAME record	Check record existence
+3	dig +trace domain	Check full resolution path
+4	nslookup record @NS_IP	Query authoritative server directly
+5	dig +nocache	Ignore local cache
+6	Internal VPC test	For private hosted zones
+7	Check firewalls / security groups	If queries cannot reach NS
+Step 9️⃣ Extra tip: subdomain delegation
+
+If test.frodo.com is subdomain with own hosted zone:
+
+Add NS records in frodo.com zone:
+
+test.frodo.com NS ns-101.awsdns-11.org
+test.frodo.com NS ns-202.awsdns-22.com
+
+
+Ensure the NS servers are from the child zone
+
+Without this → parent zone won’t point to child → fails globally
+
+TL;DR
+
+Check delegation / NS first
+
+Check record exists in the hosted zone
+
+Use dig +trace to see where lookup stops
+
+For private/internal domains, test from inside VPC
+
+Direct query authoritative NS to isolate the problem
