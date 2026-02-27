@@ -1,0 +1,908 @@
+# OpenTelemetry, Telemetry & Logging — Reference Guide
+
+A single-file educational reference for building an observability stack with **OpenTelemetry (OTel)**, **Jaeger** (traces), **Vector** (log routing), and **OpenSearch** (storage). Based on hands-on experience setting up distributed logging and tracing across **EKS** (AWS) and **OKE** (OCI).
+
+No confidential data. All IPs, endpoints, and secrets are replaced with placeholders.
+
+---
+
+## Contents
+
+1. [Big Picture — What is Observability?](#1-big-picture--what-is-observability)
+2. [Three Pillars: Logs, Traces, Metrics](#2-three-pillars-logs-traces-metrics)
+3. [OpenTelemetry (OTel) — The Standard](#3-opentelemetry-otel--the-standard)
+4. [Architecture — How the Pieces Fit](#4-architecture--how-the-pieces-fit)
+5. [OTel Collector — The Hub](#5-otel-collector--the-hub)
+   - a. Receivers
+   - b. Processors
+   - c. Exporters
+   - d. Pipelines
+   - e. Sample Config
+6. [Jaeger — Distributed Tracing](#6-jaeger--distributed-tracing)
+   - a. Components
+   - b. Storage (OpenSearch / Elasticsearch)
+   - c. TLS
+   - d. Kubernetes Manifests
+7. [Vector — Log Routing](#7-vector--log-routing)
+8. [OpenSearch — Log & Trace Storage](#8-opensearch--log--trace-storage)
+9. [Instrumenting Apps](#9-instrumenting-apps)
+   - a. Java (Auto-instrumentation with Agent)
+   - b. Python (SDK — Logs)
+   - c. Python (SDK — Traces)
+   - d. Resource Attributes
+10. [Kubernetes Manifests — Reference](#10-kubernetes-manifests--reference)
+    - a. OTel Collector (Deployment, Service, ConfigMap, ServiceAccount)
+    - b. Jaeger (Namespace, ServiceAccounts, Secrets, Deployments, Services)
+    - c. Sample Apps (Log sender, Trace sender)
+11. [Cross-Cloud: EKS → OCI (OKE)](#11-cross-cloud-eks--oci-oke)
+12. [DNS and LoadBalancer Tips](#12-dns-and-loadbalancer-tips)
+13. [Troubleshooting Checklist](#13-troubleshooting-checklist)
+14. [Key Learnings & Gotchas](#14-key-learnings--gotchas)
+
+---
+
+## 1. Big Picture — What is Observability?
+
+Observability = the ability to understand what's happening inside a system by looking at its **external outputs**: logs, traces, and metrics.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       Your Application                       │
+│                                                              │
+│   Logs  ──┐    Traces  ──┐    Metrics  ──┐                  │
+└───────────┼──────────────┼──────────────┼────────────────────┘
+            │              │              │
+            ▼              ▼              ▼
+      ┌──────────────────────────────────────┐
+      │         OTel Collector (Hub)         │
+      │  Receives → Processes → Exports      │
+      └──────┬──────────┬──────────┬─────────┘
+             │          │          │
+             ▼          ▼          ▼
+         OpenSearch   Jaeger    Prometheus
+          (Logs)     (Traces)   (Metrics)
+```
+
+* **Why not just `console.log`?** In distributed systems (microservices, K8s), logs from one pod don't tell the full story. You need correlated traces (which services were involved in a request) and centralized log storage (search across all pods/services).
+
+---
+
+## 2. Three Pillars: Logs, Traces, Metrics
+
+| Pillar | What it is | Example | Tool |
+|--------|-----------|---------|------|
+| **Logs** | Timestamped text events | `2025-01-01 INFO: User login successful` | OpenSearch, Loki, ELK |
+| **Traces** | Request flow across services (spans) | Request → API → Auth → DB (with timing) | Jaeger, Zipkin, Tempo |
+| **Metrics** | Numeric measurements over time | `http_requests_total: 1523` | Prometheus, Grafana |
+
+```
+Trace (one request):
+├── Span: API Gateway (200ms)
+│   ├── Span: Auth Service (50ms)
+│   └── Span: DB Query (120ms)
+└── Total: 200ms
+```
+
+* **Span** = a unit of work (function call, HTTP request, DB query) with a start time, duration, and attributes.
+* **Trace** = a tree of spans representing one end-to-end request.
+* A **trace ID** ties all spans together; a **span ID** identifies each span; a **parent span ID** links child to parent.
+
+---
+
+## 3. OpenTelemetry (OTel) — The Standard
+
+**OpenTelemetry** is a vendor-neutral standard for generating, collecting, and exporting telemetry data (logs, traces, metrics).
+
+| Component | What it does |
+|-----------|-------------|
+| **OTel SDK** | Library you add to your app to generate telemetry (e.g. Python SDK, Java agent) |
+| **OTel Collector** | Standalone binary/container that receives, processes, and exports telemetry |
+| **OTLP** | OpenTelemetry Protocol — the wire format (gRPC on port 4317, HTTP on port 4318) |
+
+**Key idea:** Your app sends OTLP → OTel Collector → backends (Jaeger, OpenSearch, Prometheus, etc.). The Collector decouples your app from the backend.
+
+---
+
+## 4. Architecture — How the Pieces Fit
+
+### EC2 (VM-based app)
+
+```
+App (e.g. Java with OTel agent)
+    │  OTLP (4317/4318)
+    ▼
+OTel Collector (systemd on same EC2)
+    │
+    ├── Logs  → Vector (remote) → OpenSearch
+    └── Traces → Jaeger (remote, OTLP gRPC 4317)
+```
+
+### EKS / Kubernetes
+
+```
+App Pod (with OTel SDK or sidecar)
+    │  OTLP (4317/4318)
+    ▼
+OTel Collector Pod (Deployment in same namespace)
+    │
+    ├── Logs  → Vector (cross-cluster or remote) → OpenSearch
+    └── Traces → Jaeger (cross-cluster or remote, OTLP gRPC 4317)
+```
+
+### Cross-cloud (EKS → OCI)
+
+```
+EKS Cluster                          OCI (OKE) Cluster
+┌──────────────┐                    ┌──────────────────────┐
+│ App Pod      │                    │ Jaeger Collector     │
+│    ↓         │                    │   (OTLP 4317, TLS)  │
+│ OTel Coll.   │── traces (TLS) ──→│                      │
+│    ↓         │                    │ Jaeger Query (UI)    │
+│              │── logs (TLS) ────→ │ Vector → OpenSearch  │
+└──────────────┘                    └──────────────────────┘
+```
+
+---
+
+## 5. OTel Collector — The Hub
+
+The OTel Collector has 4 core concepts:
+
+### a. Receivers
+
+What the collector **listens on** to receive telemetry.
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317    # apps send here (gRPC)
+      http:
+        endpoint: 0.0.0.0:4318    # apps send here (HTTP)
+```
+
+### b. Processors
+
+Transform, filter, enrich data in-flight.
+
+```yaml
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+  memory_limiter:
+    limit_mib: 512
+    check_interval: 1s
+
+  k8sattributes:                   # enrich with K8s metadata
+    auth_type: serviceAccount
+    extract:
+      metadata:
+        - k8s.pod.name
+        - k8s.namespace.name
+        - k8s.deployment.name
+        - k8s.node.name
+
+  resource:                        # add static attributes
+    attributes:
+      - key: deployment.environment
+        value: qa
+        action: upsert
+      - key: k8s.cluster.name
+        value: my-cluster
+        action: upsert
+```
+
+### c. Exporters
+
+Where the collector **sends** data.
+
+```yaml
+exporters:
+  # Logs → Vector (remote)
+  otlp/vector:
+    endpoint: <VECTOR_HOST>:4317
+    tls:
+      insecure: false
+      insecure_skip_verify: true
+    compression: gzip
+
+  # Traces → Jaeger (remote)
+  otlp/jaeger:
+    endpoint: <JAEGER_COLLECTOR_HOST>:4317
+    tls:
+      insecure: false
+      insecure_skip_verify: true    # for self-signed or IP-based
+```
+
+### d. Pipelines
+
+Wire receivers → processors → exporters per signal type.
+
+```yaml
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, resource, batch]
+      exporters: [otlp/vector]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, resource, batch]
+      exporters: [otlp/jaeger]
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888         # collector self-metrics
+```
+
+### e. Full Sample Config (ConfigMap)
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  otel-collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+      memory_limiter:
+        limit_mib: 512
+        check_interval: 1s
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.namespace.name
+            - k8s.deployment.name
+            - k8s.node.name
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: qa
+            action: upsert
+    exporters:
+      otlp/vector:
+        endpoint: <VECTOR_HOST>:4317
+        tls:
+          insecure: false
+          insecure_skip_verify: true
+        compression: gzip
+      otlp/jaeger:
+        endpoint: <JAEGER_HOST>:4317
+        tls:
+          insecure: false
+          insecure_skip_verify: true
+    service:
+      pipelines:
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [otlp/vector]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [otlp/jaeger]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+```
+
+---
+
+## 6. Jaeger — Distributed Tracing
+
+### a. Components
+
+| Component | Role | Ports |
+|-----------|------|-------|
+| **Jaeger Collector** | Receives traces (OTLP, Jaeger, Zipkin) | 4317 (OTLP gRPC), 14250 (Jaeger gRPC), 9411 (Zipkin) |
+| **Jaeger Query** | UI + query API | 8443 (HTTPS) or 16686 (HTTP) |
+| **Jaeger All-in-One** | Collector + Query + Ingester combined (dev/small) | All above |
+
+### b. Storage Backend
+
+Jaeger stores traces in a backend. Common options:
+
+| Backend | When to use |
+|---------|-------------|
+| **In-memory** | Dev/testing only (data lost on restart) |
+| **OpenSearch / Elasticsearch** | Production; full-text search on traces |
+| **Cassandra** | Large scale, write-heavy |
+| **Kafka** | Buffer between collector and storage |
+
+Config example (environment vars on Jaeger collector):
+
+```yaml
+env:
+  - name: SPAN_STORAGE_TYPE
+    value: elasticsearch
+  - name: ES_SERVER_URLS
+    value: https://opensearch-host:9200
+  - name: ES_USERNAME
+    value: admin
+  - name: ES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: jaeger-es-secret
+        key: password
+  - name: ES_INDEX_PREFIX
+    value: jaeger
+  - name: ES_TLS_ENABLED
+    value: "true"
+```
+
+### c. TLS
+
+Jaeger collector can require TLS on OTLP:
+
+```
+--otlp.grpc.tls.enabled=true
+--otlp.grpc.tls.cert=/etc/jaeger-tls/tls.crt
+--otlp.grpc.tls.key=/etc/jaeger-tls/tls.key
+```
+
+Clients (OTel Collector) must connect with TLS:
+
+```yaml
+otlp/jaeger:
+  endpoint: <JAEGER_HOST>:4317
+  tls:
+    insecure: false
+    insecure_skip_verify: true   # for self-signed certs or IP-based
+```
+
+### d. Kubernetes Manifests (Jaeger)
+
+**Namespace:**
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jaeger
+```
+
+**ServiceAccounts:**
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jaeger-collector
+  namespace: jaeger
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jaeger-query
+  namespace: jaeger
+```
+
+**Services (LoadBalancer for external access):**
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-collector
+  namespace: jaeger
+spec:
+  type: LoadBalancer
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: jaeger-grpc
+      port: 14250
+      targetPort: 14250
+    - name: zipkin
+      port: 9411
+      targetPort: 9411
+  selector:
+    app.kubernetes.io/component: collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-query
+  namespace: jaeger
+spec:
+  type: LoadBalancer
+  ports:
+    - name: https-query
+      port: 8443
+      targetPort: 16686
+  selector:
+    app.kubernetes.io/component: query
+```
+
+---
+
+## 7. Vector — Log Routing
+
+**Vector** (by Datadog) is a log/event router. It receives logs (e.g. from OTel Collector via OTLP) and forwards them to sinks (e.g. OpenSearch).
+
+```
+OTel Collector → (OTLP gRPC) → Vector → (HTTP) → OpenSearch
+```
+
+Vector config (simplified):
+
+```toml
+[sources.otlp_logs]
+type = "opentelemetry"
+address = "0.0.0.0:4317"
+mode = "grpc"
+
+[sinks.opensearch]
+type = "elasticsearch"
+inputs = ["otlp_logs"]
+endpoints = ["https://opensearch-host:9200"]
+index = "logs-index-%Y.%m.%d"
+auth.strategy = "basic"
+auth.user = "admin"
+auth.password = "<PASSWORD>"
+tls.verify_certificate = false
+```
+
+* **Why Vector between OTel and OpenSearch?** Vector can transform, filter, and route logs; it acts as an aggregation layer so the OTel Collector config stays simple.
+
+---
+
+## 8. OpenSearch — Log & Trace Storage
+
+**OpenSearch** is an open-source search and analytics engine (fork of Elasticsearch). Used as the backend for both logs (via Vector) and traces (via Jaeger).
+
+| Use | Index pattern (example) | Written by |
+|-----|------------------------|------------|
+| **Logs** | `logs-index-*` | Vector |
+| **Traces** | `jaeger-span-*`, `jaeger-service-*` | Jaeger Collector |
+
+**Query logs in OpenSearch Dashboards:**
+```
+GET logs-index-*/_search
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "service.name": "my-app" } },
+        { "range": { "@timestamp": { "gte": "now-1h" } } }
+      ]
+    }
+  }
+}
+```
+
+---
+
+## 9. Instrumenting Apps
+
+### a. Java (Auto-instrumentation — No Code Change)
+
+Add the **OpenTelemetry Java agent** JAR to your JVM. It auto-instruments HTTP, gRPC, DB, etc.
+
+```bash
+java -javaagent:/path/to/opentelemetry-javaagent.jar -jar your-app.jar
+```
+
+Environment variables:
+
+```yaml
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://otel-collector:4317"
+  - name: OTEL_SERVICE_NAME
+    value: "my-java-service"
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: "deployment.environment=qa,service.version=1.0.0"
+  - name: OTEL_LOGS_EXPORTER
+    value: "otlp"
+  - name: OTEL_TRACES_EXPORTER
+    value: "otlp"
+```
+
+* **Zero code change:** The agent hooks into frameworks (Spring, gRPC, JDBC, etc.) automatically.
+
+### b. Python (SDK — Logs)
+
+```python
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+import logging
+
+exporter = OTLPLogExporter(
+    endpoint="http://otel-collector:4318/v1/logs",
+    timeout=5
+)
+logger_provider = LoggerProvider()
+logger_provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+
+logger = logging.getLogger("my-app")
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+logger.info("Hello from instrumented app")
+```
+
+**Dependencies:**
+```
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+```
+
+### c. Python (SDK — Traces)
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+
+resource = Resource.create({
+    "service.name": "my-python-service",
+    "deployment.environment": "qa",
+    "service.version": "1.0.0"
+})
+
+trace.set_tracer_provider(TracerProvider(resource=resource))
+tracer = trace.get_tracer("my-python-service", "1.0.0")
+
+exporter = OTLPSpanExporter(
+    endpoint="http://otel-collector:4318/v1/traces",
+    timeout=5
+)
+trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(exporter))
+
+# Create a trace with parent + child span
+with tracer.start_as_current_span("handle-request") as span:
+    span.set_attribute("http.method", "GET")
+    span.set_attribute("http.url", "/api/users")
+    # child span (e.g. DB call)
+    with tracer.start_as_current_span("db-query"):
+        pass  # your DB logic here
+```
+
+### d. Resource Attributes
+
+Resource attributes identify the app in backends (OpenSearch, Jaeger).
+
+| Attribute | Env var | Example |
+|-----------|---------|---------|
+| Service name | `OTEL_SERVICE_NAME` | `my-app` |
+| Environment | `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=...` | `qa`, `prod` |
+| Version | `OTEL_RESOURCE_ATTRIBUTES=service.version=...` | `1.0.0` |
+| Cluster | `OTEL_RESOURCE_ATTRIBUTES=k8s.cluster.name=...` | `eks-prod` |
+
+**Important:** Set `OTEL_SERVICE_NAME` per app so you can filter in Jaeger UI and OpenSearch by service.
+
+---
+
+## 10. Kubernetes Manifests — Reference
+
+### a. OTel Collector
+
+**Deployment:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      serviceAccountName: otel-collector
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.102.0
+          args:
+            - --config=/etc/otel-config/otel-collector.yaml
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 8888
+              name: metrics
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8888
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8888
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel-config
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+```
+
+**Service:**
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: metrics
+      port: 8888
+      targetPort: 8888
+  selector:
+    app: otel-collector
+```
+
+**ServiceAccount:**
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: observability
+```
+
+### b. Sample App — Log Sender (Python)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-sender-app
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-sender-app
+  template:
+    metadata:
+      labels:
+        app: log-sender-app
+    spec:
+      containers:
+        - name: app
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp > /dev/null 2>&1
+              python3 -c "
+              import logging, json, time
+              from datetime import datetime
+              from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+              from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+              from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+              exporter = OTLPLogExporter(endpoint='http://otel-collector:4318/v1/logs', timeout=5)
+              lp = LoggerProvider()
+              lp.add_log_record_processor(BatchLogRecordProcessor(exporter))
+              logger = logging.getLogger('log-sender')
+              logger.addHandler(LoggingHandler(level=logging.NOTSET, logger_provider=lp))
+              logger.setLevel(logging.INFO)
+
+              i = 0
+              while True:
+                  i += 1
+                  logger.info(json.dumps({'msg': f'Log #{i}', 'ts': datetime.utcnow().isoformat()}))
+                  print(f'Sent log #{i}', flush=True)
+                  time.sleep(5)
+              "
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: log-sender-app
+```
+
+### c. Sample App — Trace Sender (Python)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trace-sender-app
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trace-sender-app
+  template:
+    metadata:
+      labels:
+        app: trace-sender-app
+    spec:
+      containers:
+        - name: app
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp > /dev/null 2>&1
+              python3 -c "
+              import time
+              from datetime import datetime
+              from opentelemetry import trace
+              from opentelemetry.sdk.trace import TracerProvider
+              from opentelemetry.sdk.trace.export import BatchSpanProcessor
+              from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+              from opentelemetry.sdk.resources import Resource
+
+              resource = Resource.create({'service.name': 'trace-sender-app', 'deployment.environment': 'qa'})
+              trace.set_tracer_provider(TracerProvider(resource=resource))
+              tracer = trace.get_tracer('trace-sender-app')
+              exporter = OTLPSpanExporter(endpoint='http://otel-collector:4318/v1/traces', timeout=5)
+              trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(exporter))
+
+              i = 0
+              while True:
+                  i += 1
+                  with tracer.start_as_current_span('process-request') as span:
+                      span.set_attribute('counter', i)
+                      time.sleep(0.3)
+                      with tracer.start_as_current_span('db-query'):
+                          time.sleep(0.2)
+                  print(f'Sent trace #{i}', flush=True)
+                  time.sleep(10)
+              "
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: trace-sender-app
+```
+
+---
+
+## 11. Cross-Cloud: EKS → OCI (OKE)
+
+When your apps are on **EKS (AWS)** but Jaeger/OpenSearch are on **OCI (OKE)**:
+
+| What | How |
+|------|-----|
+| **Traces** | EKS OTel Collector exports via `otlp/jaeger` → Jaeger Collector on OKE (LoadBalancer IP or DNS, port 4317, TLS) |
+| **Logs** | EKS OTel Collector exports via `otlp/vector` → Vector on OKE → OpenSearch |
+| **Network** | OKE services use LoadBalancer (public or private IP). EKS must be able to reach that IP (peering, public internet, VPN). |
+| **TLS** | Required for cross-network. Use `insecure_skip_verify: true` for self-signed certs. |
+| **DNS** | Create A records (e.g. Route53) pointing to OKE LoadBalancer IPs so config uses hostnames (portable across LB IP changes). |
+
+---
+
+## 12. DNS and LoadBalancer Tips
+
+- **Use DNS (e.g. `jaeger.example.com`)** in OTel config instead of raw IPs. When the LB IP changes (e.g. after a CIDR move), update DNS only — no config change.
+- **Check DNS from inside the cluster:**
+  ```bash
+  kubectl run -it --rm dns-check --image=busybox --restart=Never -- nslookup jaeger.example.com
+  ```
+- **Get LoadBalancer IP:**
+  ```bash
+  kubectl get svc -n jaeger jaeger-collector -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+  ```
+- **If DNS doesn't resolve from the cluster:** Use the LB IP directly in the exporter config; fix DNS separately.
+
+---
+
+## 13. Troubleshooting Checklist
+
+| Problem | What to check |
+|---------|---------------|
+| **Logs not reaching OpenSearch** | Check Vector auth (username/password). Check OTel Collector logs for export errors. Verify network connectivity (OTel → Vector → OpenSearch). |
+| **Traces not in Jaeger UI** | Check OTel Collector logs for Jaeger export errors. Verify TLS config. Check Jaeger collector logs. Verify Jaeger → OpenSearch connectivity. |
+| **OTel Collector not receiving** | Check pod is running. Check Service exists. Check app is sending to correct endpoint (4317 or 4318). |
+| **401 Unauthorized** | Wrong password in Vector or Jaeger for OpenSearch auth. |
+| **DNS not resolving** | Check A record exists. Check from inside the cluster (`nslookup`). Use LB IP as fallback. |
+| **Connection refused / timeout** | Security group / firewall blocking. Wrong port. Service not running. |
+| **TLS handshake error** | Missing `insecure_skip_verify: true` for self-signed certs. Or TLS not enabled on one side. |
+
+**Quick debug commands (K8s):**
+
+```bash
+# Pod status
+kubectl get pods -n observability
+
+# OTel Collector logs
+kubectl logs -n observability -l app=otel-collector -f
+
+# Test connectivity from inside cluster
+kubectl run -it --rm conn-check --image=curlimages/curl --restart=Never -- \
+  curl -vsk --connect-timeout 5 https://<JAEGER_HOST>:4317
+
+# Jaeger collector logs (if on same cluster)
+kubectl logs -n jaeger -l app.kubernetes.io/component=collector -f
+```
+
+---
+
+## 14. Key Learnings & Gotchas
+
+1. **OTel Collector is the hub.** Apps don't talk directly to Jaeger or OpenSearch; they send OTLP to the collector, which routes to the right backend. This decouples apps from infrastructure.
+
+2. **OTLP ports:** 4317 = gRPC, 4318 = HTTP. Both work; gRPC is more common for server-to-server. HTTP is easier to debug (`curl`).
+
+3. **TLS matters cross-network.** If OTel Collector and Jaeger are in different clouds/VPCs, use TLS. For self-signed certs, set `insecure_skip_verify: true` on the client (OTel exporter).
+
+4. **Resource attributes are essential.** Without `service.name`, all logs/traces look the same in the backend. Set it per app.
+
+5. **k8sattributes processor** enriches telemetry with pod name, namespace, deployment, node — very useful for filtering in OpenSearch. Requires a ServiceAccount with RBAC.
+
+6. **Vector handles log routing.** OTel Collector sends to Vector; Vector sends to OpenSearch. This way you can transform, filter, and buffer logs in Vector without changing the OTel config.
+
+7. **Jaeger stores in OpenSearch.** Index prefix `jaeger` creates `jaeger-span-*`, `jaeger-service-*` indices. Logs use a different index pattern (e.g. `logs-index-*`).
+
+8. **Java auto-instrumentation is zero-code.** Just add the agent JAR and env vars. Python requires SDK code (create provider, exporter, processor).
+
+9. **Use `batch` processor.** Without it, every log/trace is sent individually — high overhead. `batch` groups records and sends in bulk.
+
+10. **`memory_limiter` prevents OOM.** The collector can buffer a lot of data; `memory_limiter` drops data before the process is killed.
+
+11. **DNS over IPs.** Use DNS names in exporter endpoints. When a LoadBalancer IP changes (common in cloud), update the DNS record — no config redeploy.
+
+12. **Separate namespaces.** `observability` for OTel Collector + apps; `jaeger` for Jaeger. Keeps concerns separate.
+
+---
+
+## Quick Reference Card
+
+| Component | Image | Ports | Config |
+|-----------|-------|-------|--------|
+| OTel Collector | `otel/opentelemetry-collector-contrib:0.102.0` | 4317, 4318, 8888 | ConfigMap |
+| Jaeger Collector | `jaegertracing/jaeger-collector:1.53.0` | 4317, 14250, 9411 | Env vars + Secrets |
+| Jaeger Query | `jaegertracing/jaeger-query:1.53.0` | 8443/16686 | Env vars + Secrets |
+| Vector | `timberio/vector:latest` | 4317 | ConfigMap/toml |
+| OpenSearch | `opensearchproject/opensearch:2.x` | 9200, 9300 | Config |
+
+| Protocol | Port | Use |
+|----------|------|-----|
+| OTLP gRPC | 4317 | App → Collector, Collector → Jaeger, Collector → Vector |
+| OTLP HTTP | 4318 | App → Collector (alternative to gRPC) |
+| Jaeger gRPC | 14250 | Legacy Jaeger clients → Collector |
+| Zipkin | 9411 | Zipkin clients → Collector |
+| Jaeger UI | 8443 or 16686 | Browser → Jaeger Query |
+| OpenSearch | 9200 | Jaeger / Vector → OpenSearch |
+
+---
+
+*Built from hands-on experience setting up distributed logging and tracing on EKS and OCI. All IPs, endpoints, and credentials are placeholders.*
