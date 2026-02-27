@@ -1,0 +1,720 @@
+# AWS WAF (Web Application Firewall) — Reference Guide
+
+A single-file educational reference for working with **AWS WAFv2**. Covers concepts, rule logic, IP-based restrictions, host/path matching, testing, troubleshooting, and how WAF fits with **Route 53**, **ALB**, and **ACM**. Based on hands-on experience.
+
+No confidential data. All IPs, ARNs, domains, and account IDs are placeholders.
+
+---
+
+## Contents
+
+1. [What is AWS WAF?](#1-what-is-aws-waf)
+2. [Core Concepts](#2-core-concepts)
+3. [How WAF Evaluates Requests](#3-how-waf-evaluates-requests)
+4. [Rule Statements (Building Blocks)](#4-rule-statements-building-blocks)
+5. [Combining Statements: AND, OR, NOT](#5-combining-statements-and-or-not)
+6. [Common Rule Patterns](#6-common-rule-patterns)
+   - a. Block by IP (allowlist)
+   - b. Block by Host header
+   - c. Block by URI path
+   - d. Restrict a specific domain to specific IPs (Host + NOT IP)
+   - e. Restrict a specific API path to specific IPs (Path + NOT IP)
+7. [IP Sets](#7-ip-sets)
+8. [Rule Priority and Evaluation Order](#8-rule-priority-and-evaluation-order)
+9. [Full Rule JSON Examples](#9-full-rule-json-examples)
+10. [DNS (Route 53) + ALB + WAF — How They Fit Together](#10-dns-route-53--alb--waf--how-they-fit-together)
+11. [SSL / ACM Certificates](#11-ssl--acm-certificates)
+12. [Testing and Verification](#12-testing-and-verification)
+13. [AWS CLI Commands](#13-aws-cli-commands)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Key Learnings & Gotchas](#15-key-learnings--gotchas)
+
+---
+
+## 1. What is AWS WAF?
+
+**AWS WAF** (Web Application Firewall) is a layer-7 firewall that inspects HTTP/HTTPS requests hitting your application. It sits in front of **ALB**, **CloudFront**, or **API Gateway** and can **allow**, **block**, or **count** (monitor) requests based on rules you define.
+
+```
+Client → DNS (Route 53) → ALB → WAF evaluates → App
+                                   │
+                                   ├── Allow  → request reaches your app
+                                   ├── Block  → 403 returned to client
+                                   └── Count  → request passes, but logged for monitoring
+```
+
+**Use cases:**
+- Block traffic from outside your corporate IPs
+- Restrict a specific domain or path to certain IPs
+- Rate limiting (too many requests from one IP)
+- Block SQL injection, XSS (managed rule groups)
+- Geo-blocking (block by country)
+
+---
+
+## 2. Core Concepts
+
+| Concept | What it is |
+|---------|-----------|
+| **Web ACL** | A container that holds rules. You attach a Web ACL to an ALB, CloudFront distribution, or API Gateway. One Web ACL per resource. |
+| **Rule** | A single unit: "if this condition is met, take this action." Has a **Statement** (condition), **Action** (Allow/Block/Count), and **Priority** (order). |
+| **Statement** | The condition a rule checks — e.g. "IP is in this set", "Host header matches X", "URI path contains Y". |
+| **Action** | What happens when the rule matches: **Allow**, **Block**, or **Count**. |
+| **IP Set** | A named list of IP addresses/CIDRs you can reference in rules. Managed separately from rules. |
+| **Rule Group** | A reusable collection of rules. AWS provides **managed rule groups** (e.g. SQL injection, known bad inputs). |
+| **Visibility Config** | Per-rule settings: enable CloudWatch metrics and sampled request logging. |
+
+**Hierarchy:**
+
+```
+Web ACL (e.g. "my-app-waf")
+  ├── Rule 1 (Priority 1)
+  │     ├── Statement (condition)
+  │     └── Action (Block)
+  ├── Rule 2 (Priority 2)
+  │     ├── Statement (condition)
+  │     └── Action (Allow)
+  ├── Managed Rule Group (Priority 3)
+  └── Default Action (Allow or Block — when no rule matches)
+```
+
+---
+
+## 3. How WAF Evaluates Requests
+
+1. **Rules are evaluated in order of Priority** (lower number = evaluated first).
+2. **First match wins.** When a rule's statement matches the request, its action is applied and evaluation stops.
+3. **If no rule matches,** the Web ACL's **Default Action** is applied (usually Allow).
+
+```
+Request arrives
+  → Rule Priority 1: match? → yes → Block/Allow → DONE
+  → Rule Priority 2: match? → no  → continue
+  → Rule Priority 3: match? → yes → Block/Allow → DONE
+  → No rule matched → Default Action (Allow)
+```
+
+**Important:** If an Allow rule at Priority 1 matches a request, a Block rule at Priority 5 will never see it. Order matters.
+
+---
+
+## 4. Rule Statements (Building Blocks)
+
+### Match Statements
+
+| Statement type | What it checks | Example |
+|---------------|----------------|---------|
+| **ByteMatchStatement** | String match on a request field | Host header exactly equals `app.example.com` |
+| **IPSetReferenceStatement** | Source IP is in an IP set | IP is in `my-internal-ip-set` |
+| **GeoMatchStatement** | Source country | Country is US, IN, etc. |
+| **SizeConstraintStatement** | Size of a field (body, URI, etc.) | Body > 10KB |
+| **RegexPatternSetReferenceStatement** | Regex match on a field | URI matches `^/api/v[0-9]+/` |
+| **SqliMatchStatement** | SQL injection detection (managed) | Query string contains SQL injection |
+| **XssMatchStatement** | Cross-site scripting detection | Body contains XSS patterns |
+| **RateBasedStatement** | Request rate from one IP | > 1000 requests in 5 min |
+
+### Fields You Can Match On
+
+| Field | Description |
+|-------|-------------|
+| **SingleHeader** | A specific HTTP header (e.g. `Host`, `User-Agent`, `Authorization`) |
+| **UriPath** | The URI path (e.g. `/api/v1/users/`) |
+| **QueryString** | The query string (`?key=value`) |
+| **Body** | The request body |
+| **Method** | HTTP method (GET, POST, etc.) |
+| **AllQueryArguments** | All query parameters |
+
+### Match Types (for ByteMatchStatement)
+
+| PositionalConstraint | Meaning |
+|---------------------|---------|
+| **EXACTLY** | String must match exactly |
+| **STARTS_WITH** | String starts with the value |
+| **ENDS_WITH** | String ends with the value |
+| **CONTAINS** | String contains the value |
+| **CONTAINS_WORD** | String contains the value as a word |
+
+### Text Transformations
+
+Applied before matching. Common ones:
+
+| Type | What it does |
+|------|-------------|
+| **NONE** | No transformation |
+| **LOWERCASE** | Convert to lowercase |
+| **URL_DECODE** | Decode %XX sequences |
+| **HTML_ENTITY_DECODE** | Decode HTML entities |
+| **COMPRESS_WHITE_SPACE** | Collapse whitespace |
+
+---
+
+## 5. Combining Statements: AND, OR, NOT
+
+You can combine statements using logic operators:
+
+| Operator | JSON | Meaning |
+|----------|------|---------|
+| **AND** | `AndStatement` | All conditions must match |
+| **OR** | `OrStatement` | At least one condition must match |
+| **NOT** | `NotStatement` | Negates the inner statement |
+
+### AND Example (Block if Host matches AND IP is NOT in set)
+
+```json
+{
+  "AndStatement": {
+    "Statements": [
+      { "ByteMatchStatement": { "...": "Host = app.example.com" } },
+      {
+        "NotStatement": {
+          "Statement": {
+            "IPSetReferenceStatement": { "ARN": "<IP_SET_ARN>" }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+**Plain English:** Block the request if the Host header is `app.example.com` AND the source IP is NOT in the allowed IP set.
+
+### NOT — The Negate Gotcha
+
+In the **AWS Console**, you check **"Negate statement results"** on a statement to wrap it in `NotStatement`. In JSON, you wrap it explicitly.
+
+**Without NOT:** "IP is in the set" → matches internal IPs.
+**With NOT:** "IP is NOT in the set" → matches external IPs.
+
+If you want to **block external** traffic, you need the **NOT** so the rule matches when the IP is **not** in your allowed set.
+
+---
+
+## 6. Common Rule Patterns
+
+### a. Block All Except Specific IPs (IP Allowlist)
+
+**Goal:** Only allow traffic from IPs in `my-internal-ip-set`; block everyone else.
+
+```
+Statement: NOT (IP in my-internal-ip-set)
+Action: Block
+```
+
+**JSON:**
+```json
+{
+  "Name": "block-non-internal-traffic",
+  "Priority": 1,
+  "Statement": {
+    "NotStatement": {
+      "Statement": {
+        "IPSetReferenceStatement": {
+          "ARN": "arn:aws:wafv2:REGION:ACCOUNT:regional/ipset/my-internal-ip-set/UUID"
+        }
+      }
+    }
+  },
+  "Action": { "Block": {} },
+  "VisibilityConfig": {
+    "SampledRequestsEnabled": true,
+    "CloudWatchMetricsEnabled": true,
+    "MetricName": "block-non-internal-traffic"
+  }
+}
+```
+
+### b. Block by Host Header
+
+**Goal:** Block requests to a specific hostname.
+
+```
+Statement: Host header exactly = "blocked-site.example.com"
+Action: Block
+```
+
+### c. Block by URI Path
+
+**Goal:** Block access to a specific API path.
+
+```
+Statement: URI path exactly = "/admin/secret/"
+Action: Block
+```
+
+### d. Restrict a Domain to Specific IPs (Host + NOT IP)
+
+**Goal:** Only allow `app.example.com` from IPs in `my-ip-set`; block all others to that host.
+
+```
+Statement: AND(
+  Host header = "app.example.com",
+  NOT (IP in my-ip-set)
+)
+Action: Block
+```
+
+This is the most common pattern for **tenant-specific IP restriction**.
+
+**How it works:**
+
+| Request from | Host | Matches? | Result |
+|-------------|------|----------|--------|
+| IP in set | app.example.com | Host = yes, NOT IP = no → AND = **no** | Not blocked (Allow by default) |
+| IP NOT in set | app.example.com | Host = yes, NOT IP = yes → AND = **yes** | **Blocked** |
+| IP NOT in set | other.example.com | Host = no → AND = **no** | Not blocked by this rule |
+
+### e. Restrict a Specific API Path to Specific IPs (Path + NOT IP)
+
+**Goal:** Only allow `/api/v1/accounts/TENANT_ID/` from IPs in `my-ip-set`.
+
+```
+Statement: AND(
+  URI path exactly = "/api/v1/accounts/TENANT_ID/",
+  NOT (IP in my-ip-set)
+)
+Action: Block
+```
+
+Same logic as (d) but matching on path instead of host.
+
+---
+
+## 7. IP Sets
+
+An IP set is a **named, reusable list** of IP addresses or CIDR ranges. You create it separately and reference it by ARN in rules.
+
+**Creating an IP set (CLI):**
+
+```bash
+aws wafv2 create-ip-set \
+  --name my-internal-ip-set \
+  --scope REGIONAL \
+  --ip-address-version IPV4 \
+  --addresses "10.0.0.0/8" "172.16.0.0/12" "192.168.1.0/24" \
+  --region ap-south-1
+```
+
+**Updating an IP set (add/remove IPs):**
+
+```bash
+# First get the current lock token
+aws wafv2 get-ip-set \
+  --scope REGIONAL \
+  --id <IP_SET_ID> \
+  --name my-internal-ip-set \
+  --region ap-south-1
+
+# Then update (must include ALL addresses, not just the new ones)
+aws wafv2 update-ip-set \
+  --scope REGIONAL \
+  --id <IP_SET_ID> \
+  --name my-internal-ip-set \
+  --lock-token <LOCK_TOKEN> \
+  --addresses "10.0.0.0/8" "172.16.0.0/12" "192.168.1.0/24" "203.0.113.5/32" \
+  --region ap-south-1
+```
+
+**Important:** `update-ip-set` replaces the entire list. Include all existing addresses plus any new ones.
+
+**IP set in AWS Console:**
+WAF & Shield → IP sets → Create/Edit → Add CIDRs (one per line).
+
+---
+
+## 8. Rule Priority and Evaluation Order
+
+| Priority (number) | Evaluated | Notes |
+|-------------------|-----------|-------|
+| **1** | First | Lowest number = highest priority = checked first |
+| **2** | Second | |
+| **5** | Fifth | |
+| **10** | Tenth | |
+
+**First match wins.** If Priority 1 is an Allow rule that matches the request, Priority 5 Block rule never runs.
+
+**Common mistake:** An Allow rule at Priority 2 allows all traffic to `example.com`. Your Block rule at Priority 5 for `app.example.com` never triggers because the Allow already matched.
+
+**Fix:** Either move the Block rule to a lower priority number (e.g. 1) so it runs first, or add an exclusion to the Allow rule so it doesn't match `app.example.com`.
+
+---
+
+## 9. Full Rule JSON Examples
+
+### Example 1: Block non-internal traffic to a specific domain
+
+```json
+{
+  "Name": "block-external-to-app-domain",
+  "Priority": 5,
+  "Statement": {
+    "AndStatement": {
+      "Statements": [
+        {
+          "ByteMatchStatement": {
+            "SearchString": "app.example.com",
+            "FieldToMatch": {
+              "SingleHeader": { "Name": "host" }
+            },
+            "TextTransformations": [
+              { "Priority": 0, "Type": "NONE" }
+            ],
+            "PositionalConstraint": "EXACTLY"
+          }
+        },
+        {
+          "NotStatement": {
+            "Statement": {
+              "IPSetReferenceStatement": {
+                "ARN": "arn:aws:wafv2:REGION:ACCOUNT:regional/ipset/my-internal-ip-set/UUID"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "VisibilityConfig": {
+    "SampledRequestsEnabled": true,
+    "CloudWatchMetricsEnabled": true,
+    "MetricName": "block-external-to-app-domain"
+  },
+  "Action": { "Block": {} }
+}
+```
+
+**Reading this rule:**
+1. `AndStatement` → both conditions must match.
+2. `ByteMatchStatement` → Host header exactly equals `app.example.com`.
+3. `NotStatement` wrapping `IPSetReferenceStatement` → source IP is NOT in `my-internal-ip-set`.
+4. If both match → **Block**.
+
+**Result:** Only IPs in `my-internal-ip-set` can access `app.example.com`. Everyone else gets 403.
+
+### Example 2: Block non-internal traffic to a specific API path
+
+```json
+{
+  "Name": "block-external-to-api-path",
+  "Priority": 9,
+  "Statement": {
+    "AndStatement": {
+      "Statements": [
+        {
+          "ByteMatchStatement": {
+            "SearchString": "api/v1/accounts/TENANT_ID/",
+            "FieldToMatch": { "UriPath": {} },
+            "TextTransformations": [
+              { "Priority": 0, "Type": "NONE" }
+            ],
+            "PositionalConstraint": "EXACTLY"
+          }
+        },
+        {
+          "NotStatement": {
+            "Statement": {
+              "IPSetReferenceStatement": {
+                "ARN": "arn:aws:wafv2:REGION:ACCOUNT:regional/ipset/my-internal-ip-set/UUID"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "VisibilityConfig": {
+    "SampledRequestsEnabled": true,
+    "CloudWatchMetricsEnabled": true,
+    "MetricName": "block-external-to-api-path"
+  },
+  "Action": { "Block": {} }
+}
+```
+
+---
+
+## 10. DNS (Route 53) + ALB + WAF — How They Fit Together
+
+```
+Browser → DNS lookup → Route 53 → returns ALB IP/CNAME
+                                          │
+Browser → HTTPS request → ALB ← WAF (Web ACL attached here)
+                            │
+                            ▼
+                        Target Group → App (EC2, ECS, EKS, Lambda)
+```
+
+### Setting up a new domain with WAF restriction
+
+| Step | What | Where |
+|------|------|-------|
+| 1 | Create DNS record | Route 53: A record (alias) or CNAME → ALB |
+| 2 | Attach certificate | ACM: request cert for `app.example.com`; attach to ALB HTTPS listener |
+| 3 | Create IP set | WAF: create `my-internal-ip-set` with allowed CIDRs |
+| 4 | Create/update WAF rule | WAF: add rule to Web ACL (Host + NOT IP → Block) |
+| 5 | Attach Web ACL to ALB | WAF: associate Web ACL with the ALB |
+| 6 | Test | curl from allowed IP → 200; curl from other IP → 403 |
+
+### Route 53 record types
+
+| Type | Use case |
+|------|----------|
+| **A (Alias)** | Point to an AWS resource (ALB, CloudFront) by alias — no extra DNS hop |
+| **CNAME** | Point to any hostname (e.g. ALB DNS name) — adds a DNS hop |
+
+**Alias is preferred** for AWS resources (no charge for alias queries, works at zone apex).
+
+### Verification
+
+```bash
+# Check DNS resolves
+dig app.example.com
+# or
+host app.example.com
+
+# Should return the ALB IP or ALB DNS name
+```
+
+---
+
+## 11. SSL / ACM Certificates
+
+When adding a new domain to an ALB with WAF, the ALB HTTPS listener needs a certificate covering that domain.
+
+| Scenario | What to do |
+|----------|-----------|
+| Wildcard cert exists (e.g. `*.example.com`) | Nothing — wildcard already covers `app.example.com` |
+| No matching cert | Request one in ACM (same region as ALB). Validate via DNS or email. Attach to ALB HTTPS:443 listener. |
+| Multiple domains on same ALB | ALB supports **SNI** — add multiple certs to the same HTTPS listener. ALB picks the right cert based on the Host header. |
+
+**ACM request (CLI):**
+
+```bash
+aws acm request-certificate \
+  --domain-name app.example.com \
+  --validation-method DNS \
+  --region ap-south-1
+```
+
+Then add the CNAME validation record to Route 53 (ACM shows you what to add).
+
+---
+
+## 12. Testing and Verification
+
+### Quick test from terminal
+
+```bash
+# 1. Check your current public IP
+curl -s ifconfig.me
+
+# 2. Set your target URL
+TARGET="https://app.example.com"
+
+# 3. Request the protected resource — check HTTP status code
+curl -s -o /dev/null -w "%{http_code}" "$TARGET/api/v1/protected/"
+# Expected: 403 (if your IP is NOT in the allowed set)
+# Expected: 200 (if your IP IS in the allowed set)
+
+# 4. Sanity check — request a different path (not protected by this rule)
+curl -s -o /dev/null -w "%{http_code}" "$TARGET/api/v1/other/"
+# Expected: 200 or 404 (not blocked by WAF)
+```
+
+### Test matrix
+
+| Your IP | Path | Expected |
+|---------|------|----------|
+| In allowed set | Protected path | 200 (or app response) |
+| NOT in allowed set | Protected path | **403** (blocked by WAF) |
+| NOT in allowed set | Other path | Not blocked (200/404/etc.) |
+| In allowed set | Other path | Not blocked |
+
+### Using a proxy (to test from a different IP)
+
+```bash
+# See which IP the target will see via the proxy
+curl -s ifconfig.me -x http://PROXY_HOST:PORT
+
+# Request through the proxy
+curl -s -o /dev/null -w "%{http_code}" -x http://PROXY_HOST:PORT "$TARGET/api/v1/protected/"
+```
+
+The WAF sees the **proxy's exit IP**, not yours. If the proxy IP is not in the allowed set → expect 403.
+
+---
+
+## 13. AWS CLI Commands
+
+All commands assume `--scope REGIONAL` (for ALB/API Gateway). Use `--scope CLOUDFRONT` for CloudFront distributions.
+
+### List Web ACLs
+
+```bash
+aws wafv2 list-web-acls --scope REGIONAL --region ap-south-1 --output table
+```
+
+### Get Web ACL (see all rules)
+
+```bash
+aws wafv2 get-web-acl \
+  --scope REGIONAL \
+  --id <WEB_ACL_ID> \
+  --name <WEB_ACL_NAME> \
+  --region ap-south-1
+```
+
+### List IP Sets
+
+```bash
+aws wafv2 list-ip-sets --scope REGIONAL --region ap-south-1 --output table
+```
+
+### Get IP Set (see all IPs/CIDRs)
+
+```bash
+aws wafv2 get-ip-set \
+  --scope REGIONAL \
+  --id <IP_SET_ID> \
+  --name <IP_SET_NAME> \
+  --region ap-south-1
+```
+
+### Create IP Set
+
+```bash
+aws wafv2 create-ip-set \
+  --name my-ip-set \
+  --scope REGIONAL \
+  --ip-address-version IPV4 \
+  --addresses "10.0.0.0/8" "192.168.1.0/24" \
+  --region ap-south-1
+```
+
+### Update IP Set
+
+```bash
+# Get lock token first
+LOCK_TOKEN=$(aws wafv2 get-ip-set --scope REGIONAL --id <ID> --name <NAME> --region ap-south-1 --query 'LockToken' --output text)
+
+# Update (replaces entire list — include ALL addresses)
+aws wafv2 update-ip-set \
+  --scope REGIONAL \
+  --id <ID> \
+  --name <NAME> \
+  --lock-token "$LOCK_TOKEN" \
+  --addresses "10.0.0.0/8" "192.168.1.0/24" "203.0.113.0/32" \
+  --region ap-south-1
+```
+
+### Check which ALB a Web ACL is attached to
+
+```bash
+aws wafv2 list-resources-for-web-acl \
+  --web-acl-arn "arn:aws:wafv2:REGION:ACCOUNT:regional/webacl/NAME/UUID" \
+  --resource-type APPLICATION_LOAD_BALANCER \
+  --region ap-south-1
+```
+
+---
+
+## 14. Troubleshooting
+
+### Site should be blocked but still loads
+
+| Check | What to do |
+|-------|-----------|
+| **Negate not set** | In the rule, the IP set statement must have **Negate** checked (or wrapped in `NotStatement` in JSON). Without it, the rule matches internal IPs instead of external ones — it blocks your allowed users. |
+| **Rule priority too low** | A higher-priority Allow rule runs first and allows the request before your Block rule is evaluated. Move your Block rule to a lower priority number (e.g. 1 or 2). |
+| **Host header mismatch** | "Exactly" match is case-sensitive and literal. If the browser sends `App.Example.Com` or includes a port (`:443`), "Exactly" fails. Try **CONTAINS** or add **LOWERCASE** text transformation. |
+| **Web ACL not attached** | Confirm the Web ACL is attached to the correct ALB. Go to WAF → Web ACLs → your ACL → Associated AWS resources. |
+| **Your IP is in the set** | Run `curl -s ifconfig.me` — if your IP is in the allowed IP set, the WAF correctly lets you through. Test from a different IP. |
+| **DNS pointing to wrong ALB** | Confirm `dig app.example.com` resolves to the ALB that has the Web ACL attached. |
+
+### Site should be allowed but getting 403
+
+| Check | What to do |
+|-------|-----------|
+| **IP not in set** | Your IP may not be in the allowed IP set. Check with `curl -s ifconfig.me` and compare with the IP set contents. |
+| **CIDR too narrow** | IP set has `10.0.1.5/32` but your IP is `10.0.1.6`. Widen the CIDR or add the specific IP. |
+| **Another rule blocking** | A different rule (e.g. managed rule group, rate limit) may be blocking. Check sampled requests in WAF to see which rule matched. |
+
+### How to see which rule blocked a request
+
+1. **WAF Console → Web ACLs → your ACL → Overview tab.**
+2. Look at **Sampled requests** — shows recent requests with which rule matched and the action taken.
+3. Or enable **WAF logging** to S3/CloudWatch/Firehose for full request logs.
+
+---
+
+## 15. Key Learnings & Gotchas
+
+1. **NOT (Negate) is the #1 mistake.** If you want to block non-internal IPs, the IP set statement must be wrapped in `NotStatement`. Without it, you block your own internal users.
+
+2. **Priority order matters.** First matching rule wins. An Allow at Priority 1 overrides a Block at Priority 5. Always check the full rule list and their priorities.
+
+3. **"Exactly" match is strict.** The Host header `app.example.com` won't match `App.Example.Com` or `app.example.com:443`. Use text transformations (LOWERCASE) or CONTAINS for more tolerance.
+
+4. **IP set updates replace the full list.** `update-ip-set` takes the complete list of addresses. If you only pass new IPs, old ones are removed. Always include existing + new.
+
+5. **Lock tokens.** Every update to a Web ACL or IP set requires a lock token (from the latest get call). This prevents concurrent edits.
+
+6. **WAF scope matters.** `REGIONAL` for ALB and API Gateway. `CLOUDFRONT` for CloudFront distributions (and must be in `us-east-1`).
+
+7. **Sampled requests are your friend.** When debugging, check "Sampled requests" in the WAF console to see which rule matched and what action was taken. Much faster than guessing.
+
+8. **DNS (Route 53) is separate from WAF.** DNS resolves the domain to the ALB. WAF runs on the ALB. If DNS points to the wrong ALB, WAF rules on the correct ALB won't apply.
+
+9. **ACM certs must be in the same region as the ALB.** For CloudFront, certs must be in `us-east-1`.
+
+10. **Test from multiple IPs.** Don't just test from your office (which is probably in the allowed set). Use a phone hotspot, home Wi-Fi, or a proxy to confirm blocking works for external IPs.
+
+11. **Use `curl -s ifconfig.me`** to always know which IP the target sees. This is the IP the WAF checks, not your private/local IP.
+
+12. **One Web ACL per ALB.** You can't attach multiple Web ACLs to one ALB. Put all rules in one Web ACL, organized by priority.
+
+---
+
+## Quick Reference Card
+
+### WAF Concepts
+
+| Term | What it is |
+|------|-----------|
+| Web ACL | Container for rules; attached to ALB/CloudFront/API GW |
+| Rule | Condition (Statement) + Action (Allow/Block/Count) + Priority |
+| Statement | Condition: IP match, string match, geo, regex, rate, etc. |
+| IP Set | Reusable list of IPs/CIDRs |
+| Priority | Lower number = evaluated first; first match wins |
+| Default Action | What happens when no rule matches (usually Allow) |
+
+### Ports and Protocols
+
+| Protocol | What WAF sees |
+|----------|--------------|
+| HTTP (80) | Full request: headers, URI, body, query, method |
+| HTTPS (443) | Same (TLS terminates at ALB; WAF sees decrypted request) |
+
+### Common Actions
+
+| Action | Effect |
+|--------|--------|
+| **Allow** | Request passes to app |
+| **Block** | 403 returned to client |
+| **Count** | Request passes, but logged (for testing rules before enforcing) |
+
+### End-to-End Flow
+
+```
+1. User types app.example.com
+2. DNS (Route 53) → resolves to ALB
+3. Browser → HTTPS → ALB (TLS terminates here)
+4. ALB → Web ACL evaluates rules by priority
+5. Rule matches? → Block (403) or Allow (forward to app)
+6. No rule matches? → Default Action (Allow)
+7. App returns response → ALB → User
+```
+
+---
+
+*Built from hands-on experience configuring AWS WAFv2 rules for IP-based domain and path restrictions. All IPs, ARNs, domains, and credentials are placeholders.*
