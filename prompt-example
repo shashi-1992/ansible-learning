@@ -1,0 +1,120 @@
+prompt_text = f"""
+        You are an expert evaluator of conversation analysis. Your task is to evaluate and compare two different LLM responses 
+        analyzing the same conversation. You must be objective and thorough in your evaluation.
+
+        AUDIO FILES PROVIDED: You have been given {len(audio_parts)} audio file(s) for this conversation. 
+        Please listen to the audio content and use it along with the provided analysis profile to evaluate the responses.
+
+        ANALYSIS PROFILE: The profile below contains Key Performance Indicators (KPIs) organized by category and metadata:
+        
+        KPIs by Category:
+        {json.dumps(analysis_profile.get('kpis_by_category', {}), indent=2)}
+        
+        Metadata (including hierarchy structure and scoring information):
+        {json.dumps(analysis_profile.get('metadata', {}), indent=2)}
+
+        For each audio file provided, please:
+        1. Compare the audio with the transcript provided in each LLM response
+        2. Evaluate transcription accuracy as part of your analysis
+
+        EVALUATION CRITERIA:
+        
+        First, identify all KPIs from the analysis profile organized by category and evaluate how well each LLM response handled each specific KPI.
+        
+        KPI Categories to evaluate:
+        - Assertion KPIs: Require yes/no answers only
+        - Category KPIs: Require selection from provided categories without additional text
+        - Scale KPIs: Require numeric answers (typically 1-10)
+        - Generic KPIs: May have varied answer formats as specified in metadata
+        
+        For the overall evaluation, score these criteria:
+
+        For every KPI in the responses:
+        1. KPI Answer Appropriateness (1-10): Is the answer appropriate as per the KPI category type?
+           - Assertion should be only yes or no, nothing else
+           - Category should be chosen from the provided categories, without any additional text
+           - Scale should only return a number within the specified range (typically 1-10)
+           - Generic should follow the format specified in metadata
+
+        2. Answer Accuracy (1-10): Are the answers accurate as per the provided transcript and the actual audio content?
+
+        3. Justification Appropriateness (1-10): Is justification for the answer appropriate?
+
+        4. Transcript Quality Evaluation:
+           - Transcript Accuracy (1-10): How close is the provided transcript to the actual audio content?
+           - Entity Extraction (1-10): Are the names and other entities mentioned in the audio accurately captured in the provided transcript?
+           - Transcript Completeness (1-10): Is the provided transcript complete with respect to the audio?
+           - Coherence Check (0-10): Does the transcript contain hallucinated or added information not present in the original audio? (0 for added hallucinations, 10 for being coherent)
+
+        Additionally, score the correctness of the following:
+        5. Vibe (1-10): How accurately is the conversation vibe captured?
+        6. Sentiment (1-10): How accurately is the sentiment analyzed?
+        7. Intent (1-10): How accurately is the intent identified?
+        8. Summary (1-10): How accurate and comprehensive is the summary?
+
+        Response 1:
+        {json.dumps(response1, indent=2)}
+
+        Response 2:
+        {json.dumps(response2, indent=2)}
+
+        Additionally, analyze which specific KPIs show the most disagreement between the two responses and provide insights on why these disagreements occur.
+
+        IMPORTANT: You must respond with ONLY a JSON object, no other text. Use exactly this structure:
+        
+        {{
+            "response1_scores": {{
+                "kpi_answer_appropriateness": <score>,
+                "answer_accuracy": <score>,
+                "justification_appropriateness": <score>,
+                "transcript_accuracy": <score>,
+                "entity_extraction": <score>,
+                "transcript_completeness": <score>,
+                "coherence_check": <score>,
+                "vibe": <score>,
+                "sentiment": <score>,
+                "intent": <score>,
+                "summary": <score>
+            }},
+            "response2_scores": {{
+                "kpi_answer_appropriateness": <score>,
+                "answer_accuracy": <score>,
+                "justification_appropriateness": <score>,
+                "transcript_accuracy": <score>,
+                "entity_extraction": <score>,
+                "transcript_completeness": <score>,
+                "coherence_check": <score>,
+                "vibe": <score>,
+                "sentiment": <score>,
+                "intent": <score>,
+                "summary": <score>
+            }},
+            "response1_average": <average_score>,
+            "response2_average": <average_score>,
+            "winner": <1_or_2_or_0_for_tie>,
+            "reasoning": "<detailed_reasoning_including_transcript_quality_analysis>",
+            "transcription_comparison": {{
+                "transcript_accuracy_analysis": "<analysis_of_how_well_each_transcript_matches_the_audio>",
+                "entity_accuracy_analysis": "<analysis_of_entity_extraction_accuracy>",
+                "completeness_analysis": "<analysis_of_transcript_completeness>",
+                "coherence_analysis": "<analysis_of_potential_hallucinations_or_added_content>"
+            }},
+            "per_kpi_analysis": {{
+                "<actual_kpi_name_from_profile>": {{
+                    "disagreement_score": <0_to_10_score_based_on_how_different_the_responses_are>,
+                    "difficulty_level": "<easy|medium|hard>",
+                    "response1_performance": "<brief_assessment_of_response1_for_this_kpi>",
+                    "response2_performance": "<brief_assessment_of_response2_for_this_kpi>",
+                    "analysis_notes": "<explanation_of_why_this_specific_kpi_causes_disagreement_or_difficulty>"
+                }}
+            }},
+            "most_disagreed_kpi": "<name_of_the_kpi_with_the_most_disagreement>",
+            "comparison_details": {{
+                "strengths_response1": ["<strength 1>", "<strength 2>"],
+                "weaknesses_response1": ["<weakness 1>", "<weakness 2>"],
+                "strengths_response2": ["<strength 1>", "<strength 2>"],
+                "weaknesses_response2": ["<weakness 1>", "<weakness 2>"]
+            }}
+        }}
+
+        Remember: Return ONLY the JSON object, with no additional text or explanation.
