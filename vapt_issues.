@@ -1,0 +1,82 @@
+# VAPT Excel report — what it is and how to fix findings
+
+## What the file usually is
+
+A **VAPT** (Vulnerability Assessment and Penetration Testing) Excel is the **structured output** of a security test. A vendor or internal team runs automated scans plus (often) manual testing, then exports **one row per finding** (or per host + finding) with severity, evidence, and sometimes remediation hints.
+
+Typical purposes:
+
+- **Prioritised backlog** for developers and infra owners  
+- **Evidence trail** for audits (what was wrong, where, when)  
+- **Sign-off** input: risk owners accept or defer with justification  
+
+Common column names (names vary by tool: Nessus, Burp, Qualys, OWASP ZAP, custom templates):
+
+| Typical column | Meaning |
+|----------------|---------|
+| **Title / Name** | Short name of the vulnerability |
+| **Severity** | Critical / High / Medium / Low / Info (or CVSS score) |
+| **CVE / CWE** | Standard identifiers, if applicable |
+| **Affected asset** | URL, IP, hostname, app name |
+| **Path / parameter** | Endpoint, file, query/body field |
+| **Description** | What the issue is |
+| **Evidence / PoC** | Request, response snippet, screenshot ref |
+| **Recommendation** | Generic fix from the scanner |
+| **Status** | Open, in progress, risk accepted, closed |
+
+## How to turn it into an action plan
+
+1. **Dedupe and group**  
+   Same root cause (e.g. missing security headers on all routes) may appear as many rows. Group by **issue type + component** so you fix once, not per URL.
+
+2. **Triage by severity and exploitability**  
+   Treat **Critical/High** with public exploit or exposed admin/auth as first. **Info/Low** can wait unless compliance mandates them.
+
+3. **Assign owners**  
+   Each row (or group) needs an owner: app team, API team, DevOps, cloud, DBA, etc.
+
+4. **Pick the fix layer**  
+   - **Code**: input validation, authz checks, crypto, dependency upgrades  
+   - **Config**: TLS, headers, WAF, firewall, IAM  
+   - **Process**: secrets rotation, SDLC, training  
+
+5. **Verify**  
+   Re-scan or manual retest the same **asset + path**; update status in the sheet.
+
+## Typical finding types → solution direction
+
+These are **patterns**, not substitutes for reading your exact title/description/CWE/CVE.
+
+| Kind of finding | General solution direction |
+|-----------------|----------------------------|
+| **SQL injection / command injection** | Parameterised queries; no string-built SQL/shell; validate/sanitise inputs; least-privilege DB accounts |
+| **XSS (reflected/stored)** | Context-aware encoding; CSP; avoid `dangerouslySetInnerHTML`/unsafe sinks; sanitise rich text |
+| **Broken authentication / session** | Strong session IDs, HttpOnly/Secure/SameSite cookies, proper logout, MFA, rate limits |
+| **Broken access control** | Server-side authorisation on every action; no IDOR; deny by default |
+| **Sensitive data exposure** | TLS everywhere, no secrets in repos/logs, encrypt at rest, minimise PII |
+| **Security misconfiguration** | Harden defaults, remove debug, patch versions, restrict admin interfaces |
+| **Vulnerable/outdated components** | Upgrade libraries; SCA in CI; monitor CVEs |
+| **Missing security headers** | HSTS, CSP, X-Frame-Options/Frame-Ancestors, X-Content-Type-Options, Referrer-Policy, etc. (as appropriate) |
+| **TLS/cipher issues** | Modern TLS only, strong ciphers, valid certs, HSTS |
+| **Verbose errors / stack traces** | Generic errors to users; details only in server logs |
+
+## Optional: “solution” column template
+
+Add a column **Proposed fix** and **Owner** to your sheet. For each grouped finding, one line each:
+
+- **Proposed fix**: concrete change (e.g. “Upgrade `library-x` to ≥ 2.4.1; run regression on module Y”)  
+- **Owner**: team or person  
+- **Target date**: sprint or calendar date  
+- **Retest**: how you’ll prove closure  
+
+## If you want this tailored to *your* Excel
+
+1. Copy the file into your project folder, e.g. `Implementation/`, **or**  
+2. Export a CSV and paste 5–10 representative rows (with sensitive URLs redacted), **or**  
+3. List the **column headers** and 2–3 **finding titles** with severities  
+
+Then you can ask for a **finding-by-finding remediation map** aligned with your stack.
+
+---
+
+*This guide is generic; your vendor’s sheet may use different column names or severity scales.*
