@@ -1,0 +1,798 @@
+# Prometheus — production monitoring, observability, alerting, LLD
+
+**Source:** Internal session by team + Platform runbooks. **Single file** — basics, Nagios comparison, Exotel architecture, adding nodes, alert thresholds, config deployment (getafix + EKS Helm), custom exporters, PromQL, dashboards, **plus** observability pillars, alert lifecycle LLD, service discovery LLD, exporter patterns, Grafana in prod, Alertmanager routing LLD, incident response workflow, alert fatigue, monitoring the monitoring, common production issues, PromQL deep-dive.
+
+**Video:** Prometheus session recording (internal Google Drive)
+
+---
+
+## §1 — What Prometheus is (basics)
+
+### What it does
+
+Prometheus is an **open-source system monitoring and alerting toolkit**. It:
+
+1. **Pulls** metrics from target nodes at regular intervals (pull-based, not push-based).
+2. Stores everything in a built-in **time-series database** (TSDB).
+3. Provides **PromQL** — a query language to slice, aggregate, and alert on metrics.
+4. Integrates with **Grafana** for dashboards and **Alertmanager** for routing alerts.
+
+### Components
+
+| Component | What it does | Default port |
+|-----------|-------------|-------------|
+| **Prometheus server** | Scrapes targets, stores TSDB, evaluates alert rules, serves PromQL. | 9090 |
+| **Node exporter** | Exposes **node-level** metrics: CPU, RAM, disk, network, load. | 9100 |
+| **Process exporter** | Exposes **process-level** metrics: uptime, CPU/RAM per process. | 9256 |
+| **Aerospike exporter** | Aerospike DB metrics. | 9145 |
+| **MySQL exporter** | MySQL server metrics. | 9104 |
+| **Alertmanager** | Receives alerts from Prometheus, routes to VictorOps/Slack/email based on labels. | 9093 |
+| **Custom exporters** | Anything you write — RTPengine, CDR, etc. | varies |
+
+### How the pull model works
+
+```mermaid
+flowchart LR
+  subgraph targets [Target nodes]
+    N1["Node 1 (node_exporter :9100)"]
+    N2["Node 2 (node_exporter :9100, mysql_exporter :9104)"]
+    N3["Node 3 (process_exporter :9256)"]
+  end
+  Prom[Prometheus server :9090] -->|"scrape every 15s"| N1
+  Prom -->|scrape| N2
+  Prom -->|scrape| N3
+  Prom -->|evaluate rules| AM[Alertmanager :9093]
+  AM -->|route| VO[VictorOps]
+  Prom -->|query| Grafana[Grafana dashboards]
+```
+
+Prometheus **discovers** targets via config (static, file-based, or AWS EC2 service discovery). Each target exposes an HTTP endpoint (`/metrics`) that Prometheus scrapes.
+
+---
+
+## §2 — Comparison with Nagios
+
+Exotel previously used **Nagios** for node-level monitoring. Migration to Prometheus is largely complete.
+
+| Aspect | Nagios | Prometheus |
+|--------|--------|-----------|
+| **Architecture** | **Push-based** — agents push check results to server. | **Pull-based** — server scrapes targets. |
+| **Focus** | **Checks** (up/down, threshold alerts). | **Metrics** (time-series data + flexible querying). |
+| **Node config** | Needs NRPE agent + check definitions on each node. | **Minimal** — just install exporter, no complex config on the node. |
+| **Querying** | Limited — mostly predefined checks. | **PromQL** — powerful aggregations, joins, rates, histograms. |
+| **Dashboards** | Nagios UI (dated). | **Grafana** integration — rich, interactive dashboards. |
+| **Alerting** | Built-in but rigid. | **Alertmanager** — flexible routing, grouping, silencing, auto-resolve. |
+| **Scalability** | Harder to scale horizontally. | Scales well; separate instances per stamp/cluster if needed. |
+
+**Why Prometheus won:** Near-zero node-side config (just install exporters + tag the AWS instance), better querying, and Grafana integration.
+
+---
+
+## §3 — Prometheus at Exotel
+
+### Architecture
+
+Exotel runs **separate Prometheus instances** per stamp and per platform type:
+
+| Instance | What it monitors | URL |
+|----------|-----------------|-----|
+| **SGP stamp (non-EKS)** | VMs in Singapore | Internal Prometheus UI (SGP) |
+| **MUM stamp (non-EKS)** | VMs in Mumbai | Internal Prometheus UI (MUM) |
+| **EKS Prometheus** | Kubernetes pods/nodes (kube-prometheus-stack) | Separate per EKS cluster |
+
+This document focuses on **non-EKS** (VM-based) Prometheus. For EKS monitoring see `EKS_MONITORING_LOGGING_ADDONS.md`.
+
+### Config lives in getafix
+
+All Prometheus configuration is managed via Ansible in the `getafix` repo:
+
+```
+exotel_code/getafix/trunk/ansible/
+  roles/prometheus_deploy_config_files/
+    templates/prometheus.yml.j2        # main Prometheus config (target discovery, scrape)
+    vars/{STAMP}/                      # per-stamp variables
+      node/default_threshold.yml       # default alert thresholds
+      node/custom_threshold_voice.yml  # group-specific overrides
+    files/alertmanager.yml             # alert routing (team -> VictorOps key)
+```
+
+### Deploying config changes
+
+```bash
+cd exotel_code/getafix/trunk/ansible
+
+# Mumbai
+ansible-playbook -i "<PROMETHEUS_SERVER_IP>," prometheus_deploy_config_files.yml \
+  -e "stamp=mum1" --user exotel --become
+
+# Singapore
+ansible-playbook -i "<PROMETHEUS_SERVER_IP>," prometheus_deploy_config_files.yml \
+  -e "stamp=sg" --user exotel --become
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `-i "<IP>,"` | Prometheus server IP (trailing comma = inline inventory). |
+| `-e "stamp=mum1"` | Region identifier (`mum1` or `sg`). |
+| `--user exotel` | SSH user. |
+| `--become` | Use sudo on target. |
+
+**What the playbook does:**
+1. Reads vars files (`vars/{stamp}.yml`, process name lists).
+2. Generates alert rules from Jinja2 templates.
+3. Copies generated files to `/prometheus/config/` on the Prometheus server.
+4. Updates `prometheus.yml`.
+5. Reloads Prometheus.
+
+### Verification after deploy
+
+```bash
+# On Prometheus server
+ssh exotel@<PROMETHEUS_SERVER_IP>
+ls -la /prometheus/config/process/alert_rules.yml
+grep -i "process" /prometheus/config/prometheus.yml
+
+# Prometheus UI
+# Status -> Rules -> look for alert group
+# Query: ALERTS{alertname=~".*Process.*"}
+
+# If issues
+journalctl -u prometheus -n 50
+```
+
+---
+
+## §4 — How to add a node to be monitored
+
+### For AWS instances
+
+Adding a node is straightforward — no Prometheus config change needed:
+
+1. **Install the required exporters** on the node (node_exporter, process_exporter, mysql_exporter, etc.).
+2. **Tag the AWS instance** with the following tags:
+
+| AWS tag | Purpose | Example value |
+|---------|---------|---------------|
+| `prom_exporters` | Comma-separated list of exporters installed on this node. Prometheus uses this for **target discovery**. | `node_exporter,process_exporter,mysql_exporter` |
+| `group` | Groups instances of the same type together. Used for **Grafana dashboards** (filter by group). | `telephone-server` |
+| `meta_team` | Team ownership. Used for **alert routing** (which team gets paged). | `voice-platform` |
+
+Prometheus discovers these tags via **EC2 service discovery** — the logic is in:
+
+```
+getafix/trunk/ansible/roles/prometheus_deploy_config_files/templates/prometheus.yml.j2
+```
+
+### For nodes outside AWS
+
+Nodes outside AWS can't be auto-discovered. Add them manually in the Prometheus config:
+
+**Sample PR:** `exotel_code: #15225` — Telephone server Prometheus configs update.
+
+You also need to handle **group identification** manually:
+
+**Sample PR:** `exotel_code: #15217` — Telephone server alerts tweak.
+
+### Grafana dashboards using group tag
+
+Once nodes are tagged with `group`, you can visualize all instances of the same type together:
+
+| Stamp | Dashboard |
+|-------|-----------|
+| SGP | Internal Grafana — Common Monitoring Using Prometheus Group (SGP) |
+| MUM | Internal Grafana — Common Monitoring Using Prometheus Group (MUM) |
+
+---
+
+## §5 — Alert thresholds and routing
+
+### Threshold files
+
+Thresholds are defined per stamp and per exporter type in getafix:
+
+```
+getafix/trunk/ansible/roles/prometheus_deploy_config_files/vars/{STAMP}/
+  node/default_threshold.yml              # baseline thresholds for all nodes
+  node/custom_threshold_voice.yml         # overrides for specific groups
+  process/default_threshold.yml
+  process/custom_threshold_<group>.yml
+```
+
+**How it works:**
+- `default_threshold.yml` — applies to **all** groups.
+- `custom_threshold_<group>.yml` — overrides defaults for a specific group. Can set **different thresholds** or **ignore alerts entirely** for certain groups.
+
+### Alert routing (Alertmanager)
+
+The routing config maps **team names** to **VictorOps routing keys**:
+
+```
+getafix/trunk/ansible/roles/prometheus_deploy_config_files/files/alertmanager.yml
+```
+
+| Config | What it does |
+|--------|-------------|
+| `meta_team` label on alert | Determines which team's route the alert takes. |
+| `routing_key` | VictorOps routing key that maps to an on-call schedule. |
+| `send_resolved: true` | Auto-resolves the alert in VictorOps when the condition clears. |
+
+### Silencing alerts
+
+You can temporarily silence alerts from the Alertmanager UI or API without changing config:
+
+**Reference:** Alert silencing guide (internal Google Doc)
+
+---
+
+## §6 — Custom exporters
+
+For most things, open-source exporters exist. But when they don't, you write your own. Exotel has two custom exporters for VoIP infrastructure:
+
+### RTPengine exporter
+
+**Repo:** `Exotel/rtpengine_exporter`  
+**What it exposes:** Active dialog count from RTPengine (how many concurrent call media sessions).  
+**Why custom:** No official Prometheus exporter for RTPengine exists.
+
+### CDR exporter
+
+**Repo:** `Exotel/cdr_exporter`  
+**What it exposes:** IP leg record details from Kamailio (call detail records).  
+**Why custom:** CDR data lives in Kamailio's internal structures — no generic exporter can extract it.
+
+### Writing a custom exporter (pattern)
+
+1. Read metrics from the service (API, socket, file, etc.).
+2. Expose them as Prometheus-format text on an HTTP `/metrics` endpoint.
+3. Register the exporter port with your Prometheus config (via `prom_exporters` tag or static config).
+
+---
+
+## §7 — Useful PromQL queries
+
+Prometheus dashboard has **autocomplete** for queries. The API also exposes metrics programmatically.
+
+### Node-level (node_exporter)
+
+**ILL utilization on specific interface in a region:**
+
+```promql
+sum(rate(node_network_transmit_bytes_total{group="telephone-server", device="eno5", instance=~"040.*"}[5m]))
+```
+
+**Average CPU utilization across cores:**
+
+```promql
+100 - (avg by (instance) (rate(node_cpu_seconds_total{group="telephone-server", instance=~"${region}.*", mode="idle"}[5m])) * 100)
+```
+
+**Load average (5 min):**
+
+```promql
+load5{group="telephone-server", instance=~"$region.*"}
+```
+
+### Process-level (process_exporter)
+
+**Process restarts (in last 5 min):**
+
+```promql
+changes(namedprocess_namegroup_oldest_start_time_seconds{group="telephone-server", instance=~"${region}.*"}[5m])
+```
+
+**File descriptors per process:**
+
+```promql
+namedprocess_namegroup_open_filedesc{group="telephone-server", instance=~"${region}.*"}
+```
+
+**Top 3 processes by CPU:**
+
+```promql
+topk(3, sum(rate(namedprocess_namegroup_cpu_seconds_total{group="telephone-server", instance=~"$region.*"}[5m])) by (instance, groupname))
+```
+
+### General patterns
+
+**Rate of counter over time (per-second):**
+
+```promql
+rate(metric_name_total{label="value"}[5m])
+```
+
+**Increase (total count change over window):**
+
+```promql
+increase(metric_name_total{label="value"}[1h])
+```
+
+**Percentile from histogram:**
+
+```promql
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+```
+
+**Alert condition example (high CPU for 5 min):**
+
+```promql
+100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+```
+
+---
+
+## §8 — Reference dashboards
+
+| Dashboard | URL | What it shows |
+|-----------|-----|---------------|
+| **Common node monitoring (by group)** — SGP | Internal Grafana — Common Monitoring Using Prometheus Group (SGP) | CPU, RAM, disk, network for all instances in a group |
+| **Common node monitoring (by group)** — MUM | Internal Grafana — Common Monitoring Using Prometheus Group (MUM) | Same, Mumbai stamp |
+| **Telephone server (instance-level)** — SGP | Internal Grafana — Telephone Server Node and Process Metrics Hostwise (SGP) | Per-host node + process metrics for telephone servers |
+
+---
+
+## §9 — Config deployment runbook (getafix)
+
+### Playbook location
+
+```
+exotel_code/getafix/trunk/ansible/prometheus_deploy_config_files.yml
+```
+
+### Run commands
+
+**Mumbai:**
+
+```bash
+cd exotel_code/getafix/trunk/ansible
+
+ansible-playbook -i "<PROMETHEUS_SERVER_IP>," prometheus_deploy_config_files.yml \
+  -e "stamp=mum1" --user exotel --become
+```
+
+**Singapore:**
+
+```bash
+cd exotel_code/getafix/trunk/ansible
+
+ansible-playbook -i "<PROMETHEUS_SERVER_IP>," prometheus_deploy_config_files.yml \
+  -e "stamp=sg" --user exotel --become
+```
+
+### What the playbook does
+
+1. Reads vars: `vars/{stamp}.yml`, `vars/{stamp}/process/process_name_platform.yml`.
+2. Generates alert rules from `templates/process/alert_rules.yml.j2` using process names.
+3. Deploys to `/prometheus/config/` on the Prometheus server.
+4. Updates `prometheus.yml`.
+5. Reloads Prometheus.
+
+### Finding the Prometheus server IP
+
+- **From vars:** `grep -i "prometheus\|monitoring" roles/prometheus_deploy_config_files/vars/mum1.yml`
+- **From Prometheus UI:** extract IP from the URL you use.
+- **Ask the team** managing Prometheus infra.
+
+### Post-deploy verification
+
+```bash
+# SSH to Prometheus server
+ssh exotel@<PROMETHEUS_SERVER_IP>
+
+# Check file was generated
+ls -la /prometheus/config/process/alert_rules.yml
+
+# Check config references it
+grep -i "process" /prometheus/config/prometheus.yml
+
+# Prometheus UI: Status -> Rules -> find your alert group
+# Query:
+ALERTS{alertname=~".*Process.*"}
+
+# If issues
+journalctl -u prometheus -n 50
+```
+
+### Troubleshooting
+
+| Problem | Check |
+|---------|-------|
+| **Connection fails** | SSH access, correct IP, network reachability. |
+| **Playbook fails** | Ansible logs, correct `stamp` value, correct branch. |
+| **Alert doesn't show** | Prometheus logs (`journalctl`), file exists on disk, config references the file. |
+
+---
+
+## §10 — EKS Prometheus deployment (Helm)
+
+This covers deploying Prometheus **on EKS** via Helm (separate from the VM-based getafix deploy in §9).
+
+### Steps
+
+1. **Go to the Helm chart directory:**
+
+```bash
+cd kubernetes_charts/prometheus
+```
+
+2. **Make your changes** in the values file(s). The alertmanager config lives in `values/values.<stamp>.yaml`.
+
+3. **Switch to the correct kube context** for the target region:
+
+```bash
+kubectl config use-context <eks-cluster-context>
+kubectl config current-context   # verify
+```
+
+4. **Generate the deployment YAML from the Helm template and verify your changes are present:**
+
+```bash
+helm template --name prometheus --namespace monitoring . \
+  -f values/values.<stamp>.yaml > /tmp/prometheus.yaml
+```
+
+Review `/tmp/prometheus.yaml` — search for your specific change to confirm it's there before applying.
+
+5. **Apply the generated file:**
+
+```bash
+kubectl apply -f /tmp/prometheus.yaml -n monitoring
+```
+
+6. **Verify pods are healthy:**
+
+```bash
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring
+```
+
+### Known issue: webhook error on apply
+
+When applying the generated YAML, you may hit this error:
+
+```
+Internal error occurred: failed calling webhook
+"prometheusrulemutate.monitoring.coreos.com": received invalid webhook response:
+expected webhook response of admission.k8s.io/v1, Kind=AdmissionReview, got /, Kind=
+```
+
+**Why it happens:** The Prometheus Operator registers a **MutatingWebhookConfiguration** for `PrometheusRule` resources. If the operator pod is down, not ready, or the webhook's API version is mismatched (v1beta1 vs v1), the webhook call fails and blocks the apply.
+
+**Fixes (try in order):**
+
+1. **Check if the Prometheus Operator pod is running:**
+
+```bash
+kubectl get pods -n monitoring | grep operator
+kubectl logs -n monitoring deployment/kube-prometheus-stack-operator --tail=50
+```
+
+If the operator is crashed or not ready, fix that first — the webhook needs a healthy operator to respond.
+
+2. **Delete the stale webhook and re-apply:**
+
+```bash
+kubectl get mutatingwebhookconfigurations | grep prometheus
+kubectl delete mutatingwebhookconfigurations <webhook-name>
+# then re-apply
+kubectl apply -f /tmp/prometheus.yaml -n monitoring
+```
+
+The operator will recreate the webhook with the correct API version when it reconciles.
+
+3. **If the operator itself is what you're trying to deploy** (chicken-and-egg), temporarily remove the webhook, apply, then let the operator recreate it:
+
+```bash
+kubectl delete mutatingwebhookconfigurations prometheus-kube-prometheus-admission
+kubectl apply -f /tmp/prometheus.yaml -n monitoring
+# operator starts -> recreates webhook automatically
+```
+
+### Values file mapping
+
+| File | What it configures |
+|------|--------------------|
+| `values/values.<stamp>.yaml` | Alertmanager config, scrape targets, alert rules, Grafana settings for that region/stamp. |
+| Chart `templates/` | Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics Kubernetes manifests. |
+
+---
+
+## §11 — Scenarios (35 real-world alert-to-fix walkthroughs)
+
+Each scenario: **alert name** -> **metric** -> **rule** -> **what you check** -> **fix**.
+
+---
+
+### 1. Disk filling up
+**Alert:** DiskUsageCritical
+**Metric:** `100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} * 100) > 90`
+**Threshold:** `vars/{stamp}/node/default_threshold.yml` -> `disk_usage_critical: 90`; override in `custom_threshold_voice.yml` for stricter groups.
+**Check:** `df -h`, `du -sh /var/log/* | sort -rh | head`, look for unrotated PCAPs, old journals, core dumps.
+**Fix:** `journalctl --vacuum-size=500M`, `logrotate --force`, delete old PCAPs. Long-term: logrotate in Git, disk resize, ship logs to OpenSearch.
+
+### 2. Disk will fill in 4 hours (predictive)
+**Alert:** DiskFillPrediction
+**Metric:** `predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[6h], 4*3600) < 0`
+**Why:** Catches slow leaks before they hit the hard threshold.
+**Fix:** Same as #1, but you have time. Find the growth source: `du --max-depth=2 / | sort -rh | head -20`.
+
+### 3. High CPU (single node)
+**Alert:** CPUUsageCritical
+**Metric:** `100 - (avg by(instance)(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90`
+**Check:** `top -c` to find the process. Cross-check with process_exporter: `topk(3, sum(rate(namedprocess_namegroup_cpu_seconds_total{instance="<ip>:9256"}[5m])) by (groupname))`
+**Fix:** Runaway process -> restart. Traffic spike -> scale. Recent deploy -> rollback.
+
+### 4. High CPU (entire group)
+**Alert:** Same rule, but fires on 5+ instances simultaneously.
+**Check:** All instances in group spiking = traffic spike or bad deploy. One instance = isolated issue.
+**Fix:** Check if a deploy happened (`git log`). Check call/request volume in app dashboard. Scale the group or rollback.
+
+### 5. Load average too high
+**Alert:** LoadAverageCritical
+**Metric:** `node_load5 > (count by(instance)(node_cpu_seconds_total{mode="idle"}) * 2)`
+**Why:** Load > 2x CPU cores means severe queue backup.
+**Check:** `uptime`, `top` (look for D state processes = I/O wait).
+**Fix:** If I/O wait high -> disk bottleneck (see #26). If CPU wait -> too many processes (see #3).
+
+### 6. Memory running low
+**Alert:** MemoryUsageCritical
+**Metric:** `(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90`
+**Check:** `free -h`, then `ps aux --sort=-%mem | head -10` to find memory hogs.
+**Fix:** Restart leaking process. Check for JVM heap misconfiguration. Long-term: set proper `maxmemory` / `-Xmx`.
+
+### 7. OOM kill happened
+**Alert:** OOMKillDetected
+**Metric:** `increase(node_vmstat_oom_kill[5m]) > 0`
+**Check:** `dmesg | grep -i "oom\|killed"` — shows which process was killed and why.
+**Fix:** Increase memory limit, fix leak, or add swap as safety net. On K8s: increase container memory limit.
+
+### 8. Swap usage high
+**Alert:** SwapUsageWarning
+**Metric:** `(node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes) / node_memory_SwapTotal_bytes * 100 > 50`
+**Why:** Swap = system is paging to disk = everything is slow.
+**Check:** `free -h`, `vmstat 1 5` (look at `si`/`so` columns).
+**Fix:** Find the memory hog (#6). Swap should be near-zero in production.
+
+### 9. Process not running
+**Alert:** ProcessDown
+**Metric:** `namedprocess_namegroup_num_procs{groupname="kamailio"} == 0`
+**for:** 1m (short — immediate user impact).
+**Check:** `systemctl status kamailio`, `journalctl -u kamailio --since "5 min ago"`.
+**Fix:** Config error -> `kamailio -c` syntax check. OOM -> `dmesg`. Segfault -> check coredump. Then `systemctl start`.
+
+### 10. Process flapping (keeps restarting)
+**Alert:** ProcessRestarting
+**Metric:** `changes(namedprocess_namegroup_oldest_start_time_seconds{groupname="kamailio"}[10m]) > 2`
+**Why:** Worse than staying down — partial state, data corruption risk.
+**Check:** `journalctl -u kamailio` for crash loop. Check if systemd `Restart=always` is masking a real bug.
+**Fix:** Disable auto-restart, fix the root cause, then re-enable.
+
+### 11. Too many open file descriptors
+**Alert:** FileDescriptorsCritical
+**Metric:** `namedprocess_namegroup_open_filedesc / namedprocess_namegroup_worst_fd_ratio > 0.8`
+**Why:** Process hits fd limit -> can't accept new connections -> drops calls/requests.
+**Check:** `ls /proc/<pid>/fd | wc -l`, check `ulimit -n`.
+**Fix:** Increase limits in `/etc/security/limits.d/`. Find fd leak (connection pool not closing?).
+
+### 12. Node completely unreachable
+**Alert:** NodeDown
+**Metric:** `up{job="node"} == 0` for 3m.
+**Check:** `ping`, `ssh`. If both fail: AWS Console -> EC2 -> instance status checks.
+**Fix:** AWS issue -> stop/start. Security group locked -> fix. Hardware -> migrate.
+
+### 13. Exporter crashed (target down but node is fine)
+**Alert:** ExporterDown
+**Metric:** `up{job="node", instance="<ip>:9100"} == 0` but `up{job="process", instance="<ip>:9256"} == 1`
+**Why:** Node is up (process exporter works) but node_exporter specifically crashed.
+**Check:** `systemctl status node_exporter`, `curl localhost:9100/metrics`.
+**Fix:** `systemctl restart node_exporter`. Check if port conflict or binary corrupted.
+
+### 14. Target disappeared from discovery
+**Alert:** TargetMissing
+**Metric:** `absent(up{instance="<ip>:9100"})` for 5m.
+**Why:** `up==0` = scrape failed. `absent()` = target gone entirely from config.
+**Check:** Was the VM terminated? Was the `prom_exporters` tag removed? Check Prometheus UI -> Status -> Service Discovery.
+**Fix:** If VM decommissioned, this is expected — clean up the alert. If accidental, fix the tag.
+
+### 15. MySQL replication lag
+**Alert:** MySQLReplicationLag (warning: >60s, critical: >300s)
+**Metric:** `mysql_slave_status_seconds_behind_master`
+**Check:** `SHOW SLAVE STATUS\G` — look at `Slave_SQL_Running`, `Last_Error`.
+**Fix:** Long-running query on replica -> kill it. Network issue -> check connectivity. IO thread stopped -> fix error and `START SLAVE`.
+
+### 16. MySQL connections exhausted
+**Alert:** MySQLConnectionsHigh
+**Metric:** `mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8`
+**Check:** `SHOW PROCESSLIST` — who's holding connections?
+**Fix:** Kill idle connections. Increase `max_connections`. Fix connection pool leak in app.
+
+### 17. MySQL slow queries spike
+**Alert:** MySQLSlowQueries
+**Metric:** `rate(mysql_global_status_slow_queries[5m]) > 10`
+**Check:** `SHOW FULL PROCESSLIST`, slow query log.
+**Fix:** Add missing index, optimize query, kill long-running query.
+
+### 18. Kafka consumer lag rising
+**Alert:** KafkaConsumerLag
+**Metric:** `sum(kafka_consumergroup_lag) by (consumergroup, topic) > 10000`
+**Check:** `kafka-consumer-groups.sh --describe`. Consumer pods running? Processing errors in logs?
+**Fix:** Consumer crash -> restart. Producer spike -> scale consumers. Poison message -> check dead-letter queue.
+
+### 19. Kafka broker down
+**Alert:** KafkaBrokerDown
+**Metric:** `kafka_brokers < 3` (or expected count)
+**Check:** `kafka-metadata.sh --snapshot` or check broker logs.
+**Fix:** Restart broker. Check disk (Kafka is disk-heavy). Check ZooKeeper/KRaft health.
+
+### 20. Kafka under-replicated partitions
+**Alert:** KafkaUnderReplicated
+**Metric:** `kafka_server_replicamanager_underreplicatedpartitions > 0`
+**Why:** Data loss risk if leader fails while replicas are behind.
+**Check:** `kafka-topics.sh --describe --under-replicated-partitions`.
+**Fix:** Broker overloaded or down. Restart lagging broker. Check disk I/O.
+
+### 21. Redis memory usage high
+**Alert:** RedisMemoryCritical
+**Metric:** `redis_memory_used_bytes / redis_memory_max_bytes > 0.9`
+**Check:** `redis-cli INFO memory`, `redis-cli MEMORY DOCTOR`.
+**Fix:** Set eviction policy. Increase `maxmemory`. Find large keys: `redis-cli --bigkeys`.
+
+### 22. Redis replication down
+**Alert:** RedisReplicationDown
+**Metric:** `redis_connected_slaves == 0` (on master) or `redis_master_link_up == 0` (on replica)
+**Check:** `redis-cli INFO replication`. Network between master and replica?
+**Fix:** Check `masterauth` password match. Restart replica. Check Sentinel: `SENTINEL masters`.
+
+### 23. Certificate expiring
+**Alert:** CertExpiringSoon (warning: <7d, critical: <3d)
+**Metric:** `(probe_ssl_earliest_cert_expiry - time()) / 86400`
+**Check:** `openssl s_client -connect <host>:<port> </dev/null | openssl x509 -noout -dates`
+**Fix:** Renew (certbot, internal CA, or vendor). Restart service to load new cert. Verify with openssl again.
+
+### 24. HTTP endpoint down (blackbox probe)
+**Alert:** EndpointDown
+**Metric:** `probe_success{job="http-probes"} == 0`
+**Check:** `curl -v <url>`. DNS? Firewall? Service crashed? Load balancer target health?
+**Fix:** Depends on root cause. Often: service restart, security group fix, DNS update.
+
+### 25. HTTP latency spike
+**Alert:** HighLatency
+**Metric:** `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 2`
+**Check:** Is it all endpoints or one? Check dependency dashboards (DB, cache, external API).
+**Fix:** Slow DB query -> optimize. Cache miss storm -> warm cache. External dependency -> circuit breaker.
+
+### 26. Disk I/O saturation
+**Alert:** DiskIOHigh
+**Metric:** `rate(node_disk_io_time_seconds_total[5m]) > 0.9`
+**Why:** Disk busy >90% of the time = everything waiting on I/O.
+**Check:** `iostat -xz 1 5` — look at `%util` column. Which device?
+**Fix:** Heavy writes -> move logs to separate disk. Upgrade to faster disk (gp3 on AWS). Reduce write load.
+
+### 27. Network errors / drops
+**Alert:** NetworkErrors
+**Metric:** `rate(node_network_transmit_errs_total[5m]) > 0` or `rate(node_network_receive_drop_total[5m]) > 0`
+**Check:** `ip -s link show`, `ethtool -S <interface>`. Ring buffer overflows? MTU mismatch?
+**Fix:** Increase ring buffer (`ethtool -G`). Fix MTU. Replace faulty NIC/cable.
+
+### 28. NTP clock drift
+**Alert:** ClockOutOfSync
+**Metric:** `abs(node_timex_offset_seconds) > 0.05`
+**Why:** TLS cert validation fails, log timestamps wrong, distributed systems break.
+**Check:** `chronyc tracking`, `timedatectl`.
+**Fix:** Restart chrony/NTP. Check if NTP servers are reachable. Firewall blocking UDP 123?
+
+### 29. Conntrack table full
+**Alert:** ConntrackFull
+**Metric:** `node_nf_conntrack_entries / node_nf_conntrack_entries_limit > 0.8`
+**Why:** NAT/firewall connection table full = new connections silently dropped = one-way audio, timeouts.
+**Check:** `cat /proc/sys/net/netfilter/nf_conntrack_count` vs `nf_conntrack_max`.
+**Fix:** Increase `nf_conntrack_max` via sysctl. Reduce conntrack timeout. Check for connection flood.
+
+### 30. RTPengine dialogs spiking
+**Alert:** RTPengineDialogsHigh
+**Metric:** `rtpengine_active_dialogs > 5000` (custom exporter)
+**Why:** More active dialogs than expected = possible call leak (calls not being torn down).
+**Check:** `rtpengine-ctl list sessions`. Compare with expected call volume.
+**Fix:** BYE messages not reaching RTPengine -> check Kamailio `rtpengine_delete()` flow. Restart RTPengine if calls are stale.
+
+### 31. Pod CrashLoopBackOff (K8s)
+**Alert:** PodCrashLooping
+**Metric:** `increase(kube_pod_container_status_restarts_total[1h]) > 5`
+**Check:** `kubectl describe pod <pod>`, `kubectl logs <pod> --previous`.
+**Fix:** Config error -> fix configmap/secret. OOM -> increase memory limit. Image error -> rollback.
+
+### 32. K8s node NotReady
+**Alert:** KubeNodeNotReady
+**Metric:** `kube_node_status_condition{condition="Ready", status="true"} == 0`
+**Check:** `kubectl describe node <node>` — look at Conditions and Events.
+**Fix:** kubelet crashed -> restart. Disk pressure -> clean up. Network -> check CNI. EC2 issue -> cordon and replace.
+
+### 33. K8s PVC almost full
+**Alert:** PVCAlmostFull
+**Metric:** `kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.1`
+**Why:** Prometheus PVC full = no more metrics stored. Kafka PVC full = broker crashes.
+**Check:** `kubectl exec -it <pod> -- df -h`.
+**Fix:** Expand PVC (if storage class supports it). Clean data. For Prometheus: reduce retention.
+
+### 34. Alert routing broken (nobody gets paged)
+**Alert:** None — this IS the failure.
+**How you notice:** Customer reports issue, but no page fired.
+**Check:** Prometheus UI -> Alerts: is the alert FIRING? Alertmanager UI: is it silenced? Is the route matching the right receiver? Alertmanager logs: webhook errors to VictorOps?
+**Fix:** Fix routing rule. Remove accidental silence. Fix VictorOps webhook secret.
+
+### 35. Grafana shows "No data"
+**Alert:** None — investigation tool is broken.
+**Check:** Data source reachable? (`Grafana -> Data Sources -> Test`). Time range correct? Template variable resolving? Prometheus has the metric? (run PromQL directly in Prometheus UI). Label values match between query and actual data?
+**Fix:** Fix data source config. Fix template variable. Adjust time range.
+
+---
+
+## §12 — How each metric type gets set up end-to-end
+
+| What you monitor | Exporter | Port | AWS tag value | Threshold file in getafix | Key metrics |
+|-----------------|----------|------|---------------|--------------------------|-------------|
+| **Node health** | node_exporter | 9100 | `node_exporter` | `vars/{stamp}/node/default_threshold.yml` | `node_cpu_seconds_total`, `node_filesystem_avail_bytes`, `node_memory_MemAvailable_bytes` |
+| **Process health** | process_exporter | 9256 | `process_exporter` | `vars/{stamp}/process/default_threshold.yml` | `namedprocess_namegroup_num_procs`, `namedprocess_namegroup_cpu_seconds_total` |
+| **MySQL** | mysqld_exporter | 9104 | `mysql_exporter` | `vars/{stamp}/mysql/default_threshold.yml` | `mysql_slave_status_seconds_behind_master`, `mysql_global_status_connections` |
+| **Aerospike** | aerospike_exporter | 9145 | `aerospike_exporter` | `vars/{stamp}/aerospike/default_threshold.yml` | namespace memory/disk usage |
+| **Kafka** | kafka_exporter | 9308 | static / ServiceMonitor | varies | `kafka_consumergroup_lag`, `kafka_brokers` |
+| **RTPengine** | rtpengine_exporter | varies | `rtpengine_exporter` | custom | `rtpengine_active_dialogs` |
+| **CDR** | cdr_exporter | varies | `cdr_exporter` | custom | IP leg record counts |
+| **Endpoint** | blackbox_exporter | 9115 | static | custom | `probe_success`, `probe_ssl_earliest_cert_expiry` |
+| **Redis** | redis_exporter | 9121 | static / ServiceMonitor | custom | `redis_memory_used_bytes`, `redis_connected_slaves` |
+| **K8s objects** | kube-state-metrics | 8080 | (built into kube-prometheus-stack) | Helm values | `kube_pod_container_status_restarts_total`, `kube_node_status_condition` |
+
+### The setup chain (same for every metric)
+
+```
+1. Install exporter (binary on VM / DaemonSet on K8s)
+2. Tag AWS instance with prom_exporters (or create ServiceMonitor on K8s)
+3. Prometheus discovers via EC2 SD + relabel (or Operator)
+4. Prometheus scrapes /metrics on the exporter port
+5. Alert rule threshold in getafix vars/{stamp}/{exporter}/default_threshold.yml
+6. Jinja2 template generates the rule YAML
+7. Ansible deploys to /prometheus/config/ and reloads
+8. Alert fires -> Alertmanager routes by meta_team -> VictorOps -> on-call
+9. Engineer opens Grafana dashboard filtered by group/instance
+10. Fix -> metric recovers -> alert auto-resolves
+```
+
+---
+
+## §13 — Incident response: what to check in what order
+
+| Order | Question | How to answer | Tool |
+|-------|----------|---------------|------|
+| **1** | Is it one node or many? | Check if other instances in the same `group` also alerting | Grafana: filter by group |
+| **2** | Did anything change recently? | Last deploy, config change, infra change | Git log, ArgoCD, Jenkins |
+| **3** | Is it a traffic spike? | Check request rate / call volume | Grafana: traffic panel |
+| **4** | Is it a dependency? | Check DB, Kafka, network, DNS | Grafana: other dashboards |
+| **5** | What do the logs say? | Filter by instance + time window | OpenSearch / `journalctl` |
+| **6** | What's the resource state? | CPU, memory, disk, fds, conntrack | Grafana: node dashboard |
+| **7** | What's the process state? | Running? Restarted? CPU/RAM usage? | Grafana: process dashboard + `systemctl` |
+
+**After fixing:** wait for auto-resolve. If it doesn't resolve in 10 min, check if you actually fixed the right thing.
+
+---
+
+## §14 — Key concepts summary
+
+| Concept | What it means |
+|---------|---------------|
+| **Scrape** | Prometheus HTTP-GETs `/metrics` from a target at regular intervals. |
+| **Target** | An endpoint Prometheus scrapes (IP:port of an exporter). |
+| **Exporter** | A process exposing metrics in Prometheus format on HTTP. |
+| **Counter** | Monotonic metric (only goes up). Always use `rate()`. |
+| **Gauge** | Point-in-time value (goes up and down). Use directly. |
+| **`for` duration** | How long a condition must be true before alert fires. Short = flappy. Long = slow. |
+| **`group_by`** | How Alertmanager groups related alerts into one notification. |
+| **Inhibition** | Suppress lower-severity alerts when higher-severity fires for same target. |
+| **Silence** | Temporary mute during known maintenance. |
+| **`predict_linear()`** | Predict when a resource will be exhausted. |
+| **`absent()`** | Fires when a metric disappears entirely (target gone). |
+| **`prom_exporters` tag** | AWS tag for auto-discovery. Comma-separated exporter names. |
+| **`group` tag** | AWS tag for Grafana dashboard filtering. |
+| **`meta_team` tag** | AWS tag for alert routing to the right team. |
+
+---
+
+*Single file. 35 scenarios covering: disk, CPU, load, memory, OOM, swap, process down, process flapping, file descriptors, node down, exporter crash, target missing, MySQL (replication, connections, slow queries), Kafka (lag, broker, under-replicated), Redis (memory, replication), certs, HTTP probe, latency, disk I/O, network errors, NTP, conntrack, RTPengine, K8s pod crash, K8s node, K8s PVC, broken routing, broken Grafana.*
