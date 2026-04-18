@@ -1,0 +1,706 @@
+# Redis — basics, deployment, operations, HA, troubleshooting
+
+**Single file** — fundamentals, data structures, protocol, install (RHEL 9 + Debian 12), Ansible (on-prem), K8s, Sentinel, Cluster, integration, maintenance, common issues, CLI cheatsheet, scenario Q&A. Confirm IPs, ports, and package names in your environment.
+
+**Sources:** Internal runbooks (voicebot_scripts on-prem-deployment), redis.conf.j2 template, K8s manifests, official Redis docs.
+
+---
+
+## §1 — High-level picture: what Redis is and how it works
+
+Before any commands, understand what Redis **does** and **why** it exists.
+
+### What Redis is
+
+Redis is an **in-memory data structure store**. It keeps all data in **RAM**, which makes it extremely fast (sub-millisecond reads/writes). It can act as:
+
+1. **Cache** — store frequently accessed data so your app doesn't hit a slow database every time.
+2. **Message broker** — pub/sub channels or list-based queues (Celery uses Redis this way).
+3. **Primary database** — with persistence enabled, Redis can be a real data store (not just throwaway cache).
+4. **Session store** — web sessions, tokens, rate-limit counters.
+
+### How it works (simplified)
+
+1. Your **application** connects to Redis over **TCP port 6379**.
+2. App sends a **command** in the RESP (Redis Serialization Protocol) text format — e.g. `SET user:123 "Alice"`.
+3. Redis processes it **single-threaded** on the main event loop (no locks, no race conditions for individual commands).
+4. Redis replies immediately from RAM — e.g. `OK` or the value `"Alice"`.
+5. Optionally, Redis **persists** to disk (RDB snapshots and/or AOF append log) so data survives restarts.
+
+### Why single-threaded matters
+
+Redis processes commands **one at a time** on its main thread. This means:
+- No locking, no deadlocks, no race conditions on a single instance.
+- **Slow commands** (e.g. `KEYS *` on millions of keys) **block everything** — there's no other thread to handle other clients while that runs.
+- Throughput is bounded by **single-core speed** — but in practice Redis handles 100k+ ops/sec because RAM access is nanoseconds.
+- Redis 6+ uses **I/O threads** for network read/write (parsing, sending responses) but command execution remains single-threaded.
+
+### Diagram
+
+```mermaid
+flowchart LR
+  subgraph clients [Application layer]
+    App1[App server 1]
+    App2[App server 2]
+    Celery[Celery worker]
+  end
+  subgraph redis_node [Redis server]
+    EVLoop["Single-threaded event loop"]
+    RAM[In-memory data]
+    Disk["Disk (RDB + AOF)"]
+    EVLoop --> RAM
+    RAM -->|"periodic snapshot / append"| Disk
+  end
+  App1 -->|"TCP 6379"| EVLoop
+  App2 -->|"TCP 6379"| EVLoop
+  Celery -->|"TCP 6379"| EVLoop
+```
+
+**Key insight:** Redis is **fast because of RAM, simple because of single-threaded execution, and durable because of optional disk persistence.** Most problems come from misunderstanding one of these three.
+
+---
+
+## §2 — Core concepts and data structures
+
+### Data structures (what makes Redis more than a key-value store)
+
+| Structure | What it is | Typical use | Key commands |
+|-----------|-----------|-------------|--------------|
+| **String** | Binary-safe byte sequence (up to 512 MB). Can hold text, numbers, serialized objects. | Cache, counters, session tokens | `SET`, `GET`, `INCR`, `DECR`, `MGET`, `SETEX` |
+| **Hash** | Field-value map under one key — like a mini row/document. | User profiles, config objects | `HSET`, `HGET`, `HGETALL`, `HDEL`, `HINCRBY` |
+| **List** | Ordered sequence (doubly linked list). | Job queues (Celery), activity feeds | `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LRANGE`, `BLPOP` |
+| **Set** | Unordered collection of unique strings. | Tags, unique visitors, intersection ops | `SADD`, `SMEMBERS`, `SINTER`, `SUNION`, `SCARD` |
+| **Sorted Set (ZSet)** | Set where each member has a **score** (float). Automatically sorted by score. | Leaderboards, rate limiters, time-series indexes | `ZADD`, `ZRANGE`, `ZRANGEBYSCORE`, `ZREM`, `ZCARD` |
+| **Stream** | Append-only log with consumer groups (like Kafka topics, built into Redis). | Event sourcing, lightweight message queues | `XADD`, `XREAD`, `XREADGROUP`, `XACK`, `XLEN` |
+| **Bitmap** | Bit-level operations on strings. | Feature flags, online/offline tracking | `SETBIT`, `GETBIT`, `BITCOUNT` |
+| **HyperLogLog** | Probabilistic cardinality counter (~0.81% error). | Unique visitor counting at scale | `PFADD`, `PFCOUNT`, `PFMERGE` |
+
+### Keys and expiry
+
+- Every value lives under a **key** (string). Convention: `namespace:id` — e.g. `session:abc123`, `user:42:profile`.
+- **TTL** (time-to-live): `EXPIRE key 3600` or `SETEX key 3600 value`. Redis auto-deletes expired keys (lazy + periodic).
+- **Eviction policies** (when `maxmemory` is hit): `noeviction` (error on write), `allkeys-lru`, `volatile-lru`, `allkeys-random`, `volatile-ttl`, etc.
+
+### Persistence (how data survives restarts)
+
+| Method | How | Tradeoff |
+|--------|-----|----------|
+| **RDB** (snapshotting) | Periodic fork + dump of entire dataset to `dump.rdb`. Config: `save 900 1` = snapshot if 1+ key changed in 900s. | Fast restores; **lose data** between snapshots. |
+| **AOF** (append-only file) | Logs every write command to `appendonly.aof`. `appendfsync everysec` = flush once per second. | Less data loss (~1s); larger file; slower restores. |
+| **RDB + AOF** | Both. Redis uses AOF for recovery (more complete), RDB for backups. | Best durability; more disk I/O. |
+| **None** | Pure cache — data gone on restart. | Fastest; only for throwaway data. |
+
+### Replication
+
+- **Master** accepts writes. One or more **replicas** receive a real-time copy (async by default).
+- Replicas are **read-only** — you can spread read load across replicas.
+- If master dies, a replica can be **promoted** — manually or by Sentinel / Cluster.
+
+### Sentinel (automatic failover for master-replica)
+
+Sentinel is a **separate process** that watches Redis master + replicas:
+1. **Monitors** — pings master; detects failure.
+2. **Notifies** — alerts admins / apps.
+3. **Failover** — promotes a replica to master; reconfigures other replicas to follow the new master.
+4. **Discovery** — clients ask Sentinel "who is the master?" and get redirected.
+
+Minimum: **3 Sentinel** processes (quorum-based voting to avoid split-brain).
+
+### Redis Cluster (horizontal sharding)
+
+- Data is split into **16384 hash slots** distributed across **multiple masters**.
+- Each master owns a range of slots; each master has replicas.
+- Clients use **MOVED** / **ASK** redirections to find the right node for a key.
+- **When to use:** When data doesn't fit in one machine's RAM, or you need write throughput beyond one node.
+- **Tradeoff:** Multi-key commands (`MGET`, `SUNION`) only work if all keys hash to the **same slot** — use `{hashtag}` to force co-location.
+
+### Protocol: RESP (Redis Serialization Protocol)
+
+Redis speaks **RESP** over TCP. It's text-based and simple:
+
+```
+*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$5\r\nAlice\r\n
+```
+
+Means: array of 3 bulk strings → `SET name Alice`. Clients (Jedis, redis-py, ioredis) handle this — you never type raw RESP.
+
+---
+
+## §3 — Install
+
+### 3.0 RHEL 9 (dnf)
+
+```bash
+sudo dnf install -y redis
+sudo systemctl enable --now redis
+redis-cli ping   # expect PONG
+```
+
+- Service name: `redis`
+- Config: `/etc/redis.conf` (RHEL) or `/etc/redis/redis.conf` (some packages)
+
+### 3.1 Debian 12 / Ubuntu (apt)
+
+```bash
+sudo apt update && sudo apt install -y redis-server redis-tools
+sudo systemctl enable --now redis-server
+redis-cli ping
+```
+
+- Service name: `redis-server`
+- Config: `/etc/redis/redis.conf`
+
+### 3.2 Ansible (on-prem — voicebot_scripts)
+
+Your on-prem deployment uses the `voicebot_scripts` repo, branch `feature/voicebot-deployment`.
+
+**Playbook:** `on-prem-deployment/playbooks/deploy-redis-sentinel.yml`  
+**Roles:** `redis`, `sentinel`, `exporter`  
+**Run Redis only:**
+
+```bash
+ansible-playbook -i inventory on-prem-deployment/playbooks/deploy-redis-sentinel.yml --tags redis
+```
+
+**OS-aware role structure:**
+- `roles/redis/tasks/main.yml` — includes `debian.yml` or `redhat.yml` based on `ansible_os_family`.
+- **Debian** path: `apt install redis-server`, config at `/etc/redis/redis.conf`, service `redis-server`.
+- **RedHat** path: `dnf install redis`, config at `/etc/redis.conf`, service `redis`.
+
+**Same-server inventory (localhost):**
+
+```ini
+localhost ansible_connection=local redis_role=master sentinel_role=sentinel
+
+[redis_cluster_servers]
+localhost
+```
+
+**Bootstrap (RHEL 9 on AWS):**
+
+```bash
+cd voicebot_scripts/on-prem-deployment/ansible-server-bootstrap
+sudo ./bootstrap-ansible-server.sh   # Debian-only; on RHEL: dnf install python3-pip && pip install ansible
+ansible --version
+ansible localhost -m ping
+```
+
+### 3.3 Kubernetes (single-instance for Celery/app cache)
+
+From your Tasker K8s manifests — `redis:7-alpine` Deployment + ClusterIP Service:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasker-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tasker-redis
+  template:
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { memory: "128Mi", cpu: "100m" }
+            limits:   { memory: "512Mi", cpu: "500m" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasker-redis
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: redis
+  selector:
+    app: tasker-redis
+```
+
+For **production HA** on K8s, use a **StatefulSet** with Sentinel sidecars or a Helm chart (Bitnami redis).
+
+### 3.4 redis.conf key parameters
+
+From your Ansible template:
+
+| Parameter | Default in template | What it controls |
+|-----------|-------------------|------------------|
+| `bind` | `0.0.0.0` | Interfaces to listen on. `127.0.0.1` = local only. |
+| `protected-mode` | `yes` | Blocks external access if no password and bind is 0.0.0.0. |
+| `port` | `6379` | TCP port. |
+| `tcp-keepalive` | `300` | Seconds between TCP keepalive probes. |
+| `supervised` | `systemd` | Let systemd manage process lifecycle. |
+| `databases` | `16` | Number of logical DBs (0–15). Most apps use DB 0. |
+| `save 900 1` | enabled | RDB snapshot triggers. |
+| `appendonly` | `yes` | Enable AOF persistence. |
+| `appendfsync` | `everysec` | AOF flush frequency (trade durability vs performance). |
+| `maxmemory-policy` | `noeviction` | What happens when RAM is full — error vs evict. |
+
+**Production tips:**
+- Set `maxmemory` explicitly (e.g. `maxmemory 4gb`) — without it, Redis grows until OOM killer strikes.
+- Set `requirepass` for any non-localhost access.
+- Disable `KEYS` command in production: `rename-command KEYS ""` in config.
+
+### Firewall
+
+**RHEL (firewalld):**
+
+```bash
+sudo firewall-cmd --permanent --add-port=6379/tcp
+sudo firewall-cmd --permanent --add-port=26379/tcp   # Sentinel
+sudo firewall-cmd --reload
+```
+
+**Debian (nftables):** add rules for TCP 6379 (Redis) and 26379 (Sentinel).
+
+**AWS:** Security Group inbound TCP 6379 from app subnet only.
+
+---
+
+## §4 — Architecture patterns (when to use what)
+
+### Standalone
+
+One Redis instance. Simplest. Good for: dev, small caches, Celery broker where loss on restart is acceptable.
+
+### Master + Replica(s)
+
+One master (writes) + N replicas (reads). Replicas are async copies. Good for: read-heavy workloads, simple HA with manual failover.
+
+### Master + Replica + Sentinel
+
+Same as above but **Sentinel** automates failover. Good for: production HA where you can't afford manual intervention. Minimum 3 Sentinel processes.
+
+```mermaid
+flowchart TD
+  subgraph sentinel_quorum [Sentinel quorum]
+    S1[Sentinel 1]
+    S2[Sentinel 2]
+    S3[Sentinel 3]
+  end
+  M[Master 6379]
+  R1[Replica 1]
+  R2[Replica 2]
+  S1 -->|monitor| M
+  S2 -->|monitor| M
+  S3 -->|monitor| M
+  M -->|replication| R1
+  M -->|replication| R2
+  S1 -.->|failover: promote| R1
+```
+
+### Redis Cluster
+
+Multiple masters, each owning a subset of 16384 hash slots. Each master has replicas. Good for: data bigger than one machine's RAM, or write throughput beyond one node.
+
+```mermaid
+flowchart LR
+  subgraph cluster [Redis Cluster]
+    M1["Master 1 (slots 0-5460)"]
+    M2["Master 2 (slots 5461-10922)"]
+    M3["Master 3 (slots 10923-16383)"]
+    R1[Replica of M1]
+    R2[Replica of M2]
+    R3[Replica of M3]
+    M1 --> R1
+    M2 --> R2
+    M3 --> R3
+  end
+  Client[App] -->|MOVED redirect| M1
+  Client -->|MOVED redirect| M2
+  Client -->|MOVED redirect| M3
+```
+
+### Decision table
+
+| Scenario | Pattern | Why |
+|----------|---------|-----|
+| Dev / local / throwaway cache | Standalone | Simplest |
+| Celery broker (small team) | Standalone or K8s single pod | Loss on restart OK; Celery retries |
+| Production cache (read-heavy) | Master + Replica + Sentinel | HA + read scale |
+| Session store (must not lose data) | Master + Replica + Sentinel + AOF | Durability + HA |
+| Data > single node RAM | Redis Cluster | Horizontal sharding |
+| Multi-region | Redis Cluster or vendor (ElastiCache, Azure Cache) | Built-in geo support |
+
+---
+
+## §5 — Integration patterns
+
+### 5.1 Application cache (read-aside / cache-aside)
+
+1. App checks Redis for key.
+2. **Hit** → return from Redis (fast).
+3. **Miss** → query database, **write result to Redis** with TTL, return to caller.
+
+**What breaks:** stale data if TTL is too long; thundering herd if many clients miss the same key simultaneously (use locking or probabilistic early refresh).
+
+### 5.2 Celery broker + backend
+
+Celery uses Redis as **message broker** (task queues via `LPUSH`/`BRPOP` on lists) and **result backend** (task results stored as keys with TTL).
+
+```python
+CELERY_BROKER_URL = "redis://tasker-redis:6379/0"
+CELERY_RESULT_BACKEND = "redis://tasker-redis:6379/1"
+```
+
+**What breaks:** Redis restart = queued tasks lost (unless using AOF + persistence). For critical pipelines, consider a dedicated broker (RabbitMQ) or Celery with `acks_late=True`.
+
+### 5.3 Session store
+
+Web framework stores session data in Redis (key = session ID, value = serialized session). TTL = session timeout.
+
+**What breaks:** Redis eviction or restart = all users logged out. Use `volatile-lru` eviction (only evict keys with TTL), set `maxmemory` generously, and enable AOF.
+
+### 5.4 Pub/Sub
+
+Redis pub/sub: publishers send to **channels**, subscribers receive in real-time. Fire-and-forget — no persistence, no replay, no consumer groups.
+
+**When to use:** Real-time notifications, cache invalidation broadcast.  
+**When NOT to use:** Reliable message delivery (use Streams or Kafka instead).
+
+### 5.5 Redis Streams (lightweight event processing)
+
+Streams = append-only log with **consumer groups** (similar to Kafka topics + consumer groups but simpler).
+
+```bash
+XADD mystream * sensor temperature 22.5
+XREADGROUP GROUP mygroup consumer1 COUNT 1 BLOCK 5000 STREAMS mystream >
+XACK mystream mygroup <message-id>
+```
+
+**When to use:** Lightweight event sourcing where you don't need Kafka's scale/durability.
+
+### 5.6 Prometheus + Grafana
+
+Install `redis_exporter` (Oliver006) — scrapes Redis `INFO` command and exposes Prometheus metrics on `:9121`.
+
+Key metrics to alert on:
+- `redis_connected_clients` — connection count
+- `redis_memory_used_bytes` vs `redis_memory_max_bytes` — memory pressure
+- `redis_keyspace_hits` / `redis_keyspace_misses` — cache hit ratio
+- `redis_connected_slaves` — replication health
+- `redis_master_link_up` — replica → master link status
+
+---
+
+## §6 — Maintain
+
+| Area | What you do |
+|------|-------------|
+| **Patches** | `apt upgrade` (Debian) or `dnf update redis` (RHEL) in staging first. Check release notes for breaking config changes. |
+| **Config** | `/etc/redis/redis.conf` (or `/etc/redis.conf`) in **Git**. Validate with `redis-server --test-memory 256` and restart. |
+| **Memory** | Monitor `INFO memory` — `used_memory` vs `maxmemory`. Alert at **80%**. |
+| **Persistence** | Check `INFO persistence` — `rdb_last_bgsave_status`, `aof_last_bgrewrite_status`. Alert on failures. |
+| **Replication** | `INFO replication` — `connected_slaves`, `master_link_status`. Replica lag = `master_repl_offset - slave_repl_offset`. |
+| **Slow log** | `SLOWLOG GET 10` — commands exceeding `slowlog-log-slower-than` (default 10ms). |
+| **Backups** | Copy `dump.rdb` off-host periodically. For AOF, run `BGREWRITEAOF` to compact, then backup. |
+| **Security** | `requirepass`, `rename-command KEYS ""`, TLS (Redis 6+), firewall (§3 firewall section). |
+| **Sentinel** | `redis-cli -p 26379 SENTINEL masters` — check quorum, failover count, last-ok-ping-reply. |
+
+**Change window:** announce → baseline `INFO` snapshot → one parameter change → `redis-cli CONFIG SET` for live changes or restart for file-only params → verify `INFO` + test app → rollback plan is previous config file in Git.
+
+---
+
+## §7 — Common issues and why they happen
+
+### OOM (Out of Memory) kill
+
+**Why:** `maxmemory` not set (or set too high). Redis keeps growing. Linux OOM killer terminates it. All cached data gone. Apps get connection refused.  
+**Fix:** Always set `maxmemory` below available RAM (leave room for OS, RDB fork, etc.). Choose an eviction policy (`allkeys-lru` for cache, `noeviction` if you need data integrity).
+
+### RDB fork failure (can't save)
+
+**Why:** RDB snapshot uses `fork()`. The forked process needs **copy-on-write** pages. If the system has insufficient RAM or `vm.overcommit_memory` is `0`, fork fails → `MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk`.  
+**Fix:** Set `vm.overcommit_memory=1` in sysctl. Ensure available RAM > `used_memory` (for worst-case COW). Or disable RDB if using AOF only.
+
+### Latency spike from slow commands
+
+**Why:** Someone runs `KEYS *` or `SMEMBERS` on a set with millions of members. Redis is single-threaded — this blocks **all** other clients for seconds.  
+**Fix:** `rename-command KEYS ""` in production. Use `SCAN` instead of `KEYS`. Monitor `SLOWLOG`. Avoid O(N) commands on large collections.
+
+### Replication lag / split-brain
+
+**Why:** Replica falls behind master because of network issues or replica doing a full resync (RDB transfer). If Sentinel promotes a lagging replica, recent writes are lost.  
+**Also:** Sentinel quorum of 2 in a 2-node setup → split-brain. Always use **odd** number of Sentinels (minimum 3).  
+**Fix:** Monitor `master_repl_offset` vs `slave_repl_offset`. Set `min-replicas-to-write 1` + `min-replicas-max-lag 10` on master to reject writes if no healthy replica exists.
+
+### Connection exhaustion
+
+**Why:** App creates a new TCP connection per request instead of using a **connection pool**. Redis `maxclients` (default 10000) fills up. New connections rejected.  
+**Fix:** Use connection pooling in your client library. Monitor `connected_clients` in INFO. Set `timeout` in redis.conf to close idle connections.
+
+### Thundering herd (cache stampede)
+
+**Why:** A popular cache key expires. Hundreds of app servers simultaneously miss the cache and all hit the database to regenerate it. Database overloaded.  
+**Fix:** Use a **lock** (Redis-based distributed lock) so only one client regenerates the cache. Or use probabilistic early expiration (refresh key *before* TTL hits).
+
+### Data loss on restart (no persistence)
+
+**Why:** Redis started with default config, `appendonly no`, no `save` directives. Restart → empty database. App serves stale or empty responses.  
+**Fix:** Enable AOF (`appendonly yes`) for durability. For pure cache, ensure app handles cache miss gracefully.
+
+### Cluster: CROSSSLOT error
+
+**Why:** Multi-key command (`MGET key1 key2`) where keys hash to **different slots** across different masters. Redis Cluster rejects it.  
+**Fix:** Use **hash tags** — `{user}:profile` and `{user}:settings` both hash on `user`, landing on the same slot.
+
+---
+
+## §8 — CLI cheatsheet
+
+### Connection and server
+
+```bash
+redis-cli ping                          # PONG
+redis-cli -h <host> -p 6379 -a <pass>  # remote with auth
+redis-cli INFO                          # all server info
+redis-cli INFO memory                   # memory section only
+redis-cli INFO replication              # replication status
+redis-cli INFO keyspace                 # DB key counts
+redis-cli CONFIG GET maxmemory          # read config
+redis-cli CONFIG SET maxmemory 4gb      # live config change (no restart)
+redis-cli CONFIG REWRITE                # persist live changes to redis.conf
+redis-cli DBSIZE                        # key count in current DB
+redis-cli SELECT 1                      # switch to DB 1
+```
+
+### Key operations
+
+```bash
+redis-cli SET mykey "hello" EX 3600     # set with 1h TTL
+redis-cli GET mykey
+redis-cli DEL mykey
+redis-cli EXISTS mykey
+redis-cli TTL mykey                     # seconds remaining (-1 = no expire, -2 = gone)
+redis-cli EXPIRE mykey 600              # set TTL on existing key
+redis-cli TYPE mykey                    # string, list, set, zset, hash, stream
+redis-cli SCAN 0 MATCH "session:*" COUNT 100   # safe iteration (not KEYS)
+```
+
+### Strings and counters
+
+```bash
+redis-cli INCR page:views               # atomic increment
+redis-cli INCRBY page:views 10
+redis-cli MSET k1 v1 k2 v2             # multi-set
+redis-cli MGET k1 k2                   # multi-get
+redis-cli SETEX token:abc 1800 "data"  # set + expire in one command
+```
+
+### Hashes
+
+```bash
+redis-cli HSET user:42 name "Alice" email "a@b.com"
+redis-cli HGET user:42 name
+redis-cli HGETALL user:42
+redis-cli HDEL user:42 email
+redis-cli HINCRBY user:42 login_count 1
+```
+
+### Lists (queues)
+
+```bash
+redis-cli LPUSH queue:tasks "task1"     # push left
+redis-cli RPOP queue:tasks              # pop right (FIFO)
+redis-cli BRPOP queue:tasks 30          # blocking pop (30s timeout) — Celery uses this
+redis-cli LRANGE queue:tasks 0 -1       # list all items
+redis-cli LLEN queue:tasks              # queue depth
+```
+
+### Sets
+
+```bash
+redis-cli SADD tags:post:1 "redis" "cache" "database"
+redis-cli SMEMBERS tags:post:1
+redis-cli SCARD tags:post:1             # count
+redis-cli SINTER tags:post:1 tags:post:2   # intersection
+```
+
+### Sorted sets
+
+```bash
+redis-cli ZADD leaderboard 100 "alice" 200 "bob"
+redis-cli ZRANGE leaderboard 0 -1 WITHSCORES
+redis-cli ZRANGEBYSCORE leaderboard 50 150
+redis-cli ZINCRBY leaderboard 10 "alice"
+redis-cli ZRANK leaderboard "alice"     # rank (0-based)
+```
+
+### Streams
+
+```bash
+redis-cli XADD events * type "login" user "alice"
+redis-cli XLEN events
+redis-cli XRANGE events - + COUNT 10
+redis-cli XGROUP CREATE events mygroup $ MKSTREAM
+redis-cli XREADGROUP GROUP mygroup consumer1 COUNT 1 BLOCK 5000 STREAMS events >
+redis-cli XACK events mygroup <id>
+redis-cli XINFO STREAM events
+redis-cli XINFO GROUPS events
+```
+
+### Pub/Sub
+
+```bash
+# Terminal 1: subscribe
+redis-cli SUBSCRIBE mychannel
+
+# Terminal 2: publish
+redis-cli PUBLISH mychannel "hello subscribers"
+```
+
+### Monitoring and debug
+
+```bash
+redis-cli MONITOR                       # live command stream (CAREFUL in prod — adds overhead)
+redis-cli SLOWLOG GET 10                # last 10 slow commands
+redis-cli SLOWLOG RESET
+redis-cli CLIENT LIST                   # all connected clients
+redis-cli CLIENT KILL ID <id>           # disconnect a client
+redis-cli MEMORY USAGE mykey            # bytes used by one key
+redis-cli MEMORY DOCTOR                 # memory health advice
+redis-cli DEBUG SLEEP 0                 # DON'T run in prod
+redis-cli LATENCY LATEST                # latency events (if enabled)
+redis-cli OBJECT ENCODING mykey         # internal encoding (ziplist, hashtable, etc.)
+```
+
+### Persistence operations
+
+```bash
+redis-cli BGSAVE                        # trigger RDB snapshot
+redis-cli BGREWRITEAOF                  # compact AOF
+redis-cli LASTSAVE                      # timestamp of last successful RDB
+redis-cli CONFIG GET save               # current RDB triggers
+redis-cli CONFIG SET save ""            # disable RDB (live)
+```
+
+### Replication
+
+```bash
+redis-cli INFO replication              # role, connected_slaves, offsets
+redis-cli REPLICAOF <master-ip> 6379    # make this node a replica (live)
+redis-cli REPLICAOF NO ONE              # promote replica to master (live)
+```
+
+### Sentinel
+
+```bash
+redis-cli -p 26379 SENTINEL masters     # list monitored masters
+redis-cli -p 26379 SENTINEL master mymaster   # detail on one master
+redis-cli -p 26379 SENTINEL replicas mymaster
+redis-cli -p 26379 SENTINEL failover mymaster   # force failover
+redis-cli -p 26379 SENTINEL get-master-addr-by-name mymaster   # current master IP:port
+```
+
+### Cluster
+
+```bash
+redis-cli --cluster create <ip1>:6379 <ip2>:6379 <ip3>:6379 \
+  <ip4>:6379 <ip5>:6379 <ip6>:6379 --cluster-replicas 1
+redis-cli CLUSTER INFO
+redis-cli CLUSTER NODES
+redis-cli CLUSTER SLOTS
+redis-cli --cluster check <ip>:6379
+redis-cli --cluster reshard <ip>:6379
+redis-cli --cluster rebalance <ip>:6379
+```
+
+### Dangerous commands (know them, avoid in prod)
+
+```bash
+redis-cli KEYS *                        # O(N) scan — blocks everything. Use SCAN instead.
+redis-cli FLUSHDB                       # delete all keys in current DB
+redis-cli FLUSHALL                      # delete all keys in ALL DBs
+redis-cli SHUTDOWN NOSAVE               # stop without saving
+```
+
+---
+
+## §9 — Scenario Q&A (drill)
+
+### 9.1 App suddenly slow, Redis seems fine
+**Scenario:** App latency spikes. `redis-cli ping` is fast.  
+**A:** Check `SLOWLOG GET 10` — a slow command (e.g. `KEYS *`, `HGETALL` on huge hash) is blocking the event loop. Check `CLIENT LIST` for a client running a long command. Check `connected_clients` — pool exhaustion means app threads wait for connections.
+
+### 9.2 Redis restarted, cache empty, DB hammered
+**Scenario:** Redis restarted (OOM or upgrade). All cache keys gone. App floods database.  
+**A:** If persistence was off — this is expected. Enable `appendonly yes`. For immediate relief: throttle app cache-miss rate (semaphore/lock pattern). Long-term: warm cache script that pre-populates hot keys.
+
+### 9.3 Sentinel failover but app still connects to old master
+**Scenario:** Master died, Sentinel promoted replica, but app still points to old IP.  
+**A:** App must use **Sentinel-aware client** (e.g. Jedis Sentinel pool, redis-py Sentinel) that asks Sentinel for current master. If app uses a hardcoded IP/DNS — it will connect to the dead node. Fix: use Sentinel discovery or a DNS entry that Sentinel updates.
+
+### 9.4 Memory keeps growing, eviction not happening
+**Scenario:** `used_memory` approaching `maxmemory` but keys aren't being evicted.  
+**A:** Check `maxmemory-policy`. If it's `noeviction` — Redis returns errors on writes instead of evicting. If it's `volatile-lru` but no keys have TTL set — nothing is eligible for eviction. Fix: set appropriate policy; ensure cache keys have TTL.
+
+### 9.5 Replica shows `master_link_status: down`
+**Scenario:** Replica can't connect to master.  
+**A:** Check network (firewall, security group). Check `requirepass` on master matches `masterauth` on replica. Check `INFO replication` on master for `connected_slaves`. If replica just restarted — it may be doing a full resync (large RDB transfer).
+
+### 9.6 CROSSSLOT error in Redis Cluster
+**Scenario:** `MGET user:1:name user:2:name` fails with CROSSSLOT.  
+**A:** Multi-key ops require same hash slot. Use hash tags: `{user:1}:name` and `{user:1}:email` both route to same slot. Or restructure to per-key commands in a pipeline.
+
+### 9.7 Fork failed — can't BGSAVE
+**Scenario:** `MISCONF Redis is configured to save RDB snapshots, but is currently unable to persist to disk.`  
+**A:** Check `dmesg` for OOM. Check `vm.overcommit_memory` — set to `1` so fork doesn't fail. Ensure RAM headroom (Redis + forked child for COW pages). If using Kubernetes — container memory limit must account for fork overhead.
+
+### 9.8 Celery tasks disappearing
+**Scenario:** Tasks pushed to Redis but workers never pick them up.  
+**A:** Check `LLEN` on the Celery queue key. If 0 — tasks were consumed or Redis was flushed. If > 0 — workers aren't connected to the right DB number or queue name. Check `CLIENT LIST` for Celery worker connections. Check Celery logs for connection errors.
+
+### 9.9 High latency on Redis behind NAT / VPN
+**Scenario:** `redis-cli` from app server takes 50ms+ for simple GET.  
+**A:** Not a Redis problem — it's network. Check `tcp-keepalive` and `timeout` settings. Check if TCP Nagle algorithm is delaying small packets — most Redis clients disable Nagle (`TCP_NODELAY`). Use `redis-cli --latency` to measure. Check MTU / fragmentation on VPN.
+
+### 9.10 Disk full from AOF
+**Scenario:** AOF file grows to fill disk. Redis stops accepting writes.  
+**A:** Run `BGREWRITEAOF` to compact. Set up a cron/timer for periodic rewrite. Monitor disk space. If disk is full now — free space (delete old RDBs, logs), then `BGREWRITEAOF`.
+
+### 9.11 Prometheus redis_exporter shows stale data
+**Scenario:** Grafana dashboards show flat lines or missing data for Redis metrics.  
+**A:** Check `redis_exporter` process is running (`ss -tlnp | grep 9121`). Check it can reach Redis (`redis_exporter` needs correct host, port, password). Check Prometheus scrape config targets. Check `redis_exporter` logs for auth errors.
+
+### 9.12 Upgrading Redis major version (e.g. 6 → 7)
+**Scenario:** Planning Redis upgrade.  
+**A:** Read release notes for breaking changes. Test in staging with prod-like data. Key concerns: deprecated commands, config param renames, RDB format compatibility (Redis is forward-compatible: 7 reads 6's RDB, not vice versa). Upgrade replicas first, then failover, then upgrade old master.
+
+### 9.13 Security audit: Redis exposed to Internet
+**Scenario:** Security scan finds port 6379 open to 0.0.0.0 with no password.  
+**A:** `protected-mode yes` blocks this if no password — but don't rely on it. Fix: `bind` to specific interface, set `requirepass`, firewall only from app subnet, TLS (Redis 6+), `rename-command` dangerous commands.
+
+---
+
+## §10 — Useful sysctl and OS tuning (Linux)
+
+```bash
+# Overcommit for RDB fork
+echo 'vm.overcommit_memory=1' | sudo tee /etc/sysctl.d/99-redis.conf
+
+# Disable THP (transparent huge pages) — Redis warns on startup
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+
+# somaxconn for high connection counts
+echo 'net.core.somaxconn=65535' | sudo tee -a /etc/sysctl.d/99-redis.conf
+
+sudo sysctl --system
+```
+
+Check Redis startup logs (`journalctl -u redis`) — it warns about each of these if misconfigured.
+
+---
+
+*Single file. Order: understand Redis → data structures → install → architecture → wire it → maintain → know what breaks → commands → drill → OS tuning.*
