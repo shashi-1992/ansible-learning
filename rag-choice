@@ -1,0 +1,782 @@
+Goals
+Goals outline the broad outcomes expected from the system
+
+No
+
+Goal
+
+1
+
+Enable SOP-based call quality analysis by implementing Retrieval-Augmented Generation (RAG) that allows LLM to access tenant-specific Standard Operating Procedures during call analysis.
+
+Problems
+To achieve each of the goals in the system, we might need to solve many problems. Stating these problems here helps us arrive at ADRs for each problem
+
+ 
+
+Goal-Problem No
+
+Problem Statement
+
+G1-1
+
+ Managed vs Self-Hosted RAG pipeline?
+
+G1-2
+
+Which managed Pipeline to choose?
+
+ 
+
+ 
+
+ 
+
+ 
+
+G1-1
+
+ Managed vs Self-Hosted RAG pipeline?
+
+Problem
+
+ Which solution to choose , managed vs self hosted RAG pipeline
+
+Options Considered
+
+Option 1:
+Vertex AI RAG engine
+
+Pros:
+
+Low implementation overhead, faster to market
+
+Full feature list of Agentic RAG available for use / implementation from day 1, Feature addition would be faster.
+
+Cons:
+
+Vendor lockin
+
+One or few LLMs lock in.
+
+With Vertex only Gemini models supported
+
+with AWS Bedrock - only Claude / llama
+
+Higher cost
+
+ 
+
+Challenges:
+Should be made on-prem compatible
+
+Option 2 : Self hosted RAG pipeline
+
+Enhancing our Exomind layer(Tasker) to add RAG datastore and enhance it capabilities to make it support Agentic RAG
+
+Pros:
+
+Full control over which RAG pipeline to choose, Self hosted and Managed solution and integrate in our application'
+
+Lower cost
+
+ 
+
+Cons:
+
+High implementation overhead to support Agentic RAG.
+
+Operational overhead to maintain RAG datastore
+
+ 
+
+Reasoning
+
+Go with option 1
+
+ 
+
+G1-2
+
+Which Managed RAG pipeline to choose
+
+Problem
+
+Which Managed RAG pipeline to choose
+
+Options Considered
+
+Options
+
+Vertex AI RAG engine
+
+Works with Gemini models
+
+Not available in India, available only in US, EU
+
+Cost: to be populated
+
+Azure AI search
+
+Works with Azure OpenAI models
+
+Available in India
+
+Requires us to work with Azure-compatible LLMs
+
+Reasoning
+
+Go with Option 1:
+
+To try out the managed solution, we can go with Vertex AI-based RAG to ensure that the architecture allows for a relatively easy switch.
+
+Constraints: Data localization of India is not supported by Gemini.
+
+For data localization requirements, we can further explore other managed RAG solutions that are based in India, like Azure AI RAG search
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+Goal Statement
+ 
+
+ 
+
+Expected Outcomes:
+
+Improve call quality analysis accuracy by grounding responses in actual SOPs
+
+Enable automated SOP compliance checking
+
+Support multi-tenant SOP management
+
+Maintain existing Gemini 2.5 Flash integration
+
+Keep data processing within compliance boundaries where possible
+
+ 
+
+ 
+
+Problems
+G1-1: Managed vs Self-Hosted RAG Solution
+Problem Statement:
+ Should we use a fully managed RAG service or build our own self-hosted RAG solution?
+
+Context:
+
+Current infrastructure: AWS ap-south-1 (Mumbai)
+
+Current LLM: Gemini 2.5 Flash via Google API
+
+Use case: Retrieve relevant SOP sections to augment call analysis
+
+Requirements: Multi-tenant isolation, vector search, document management
+
+Constraints: Engineering resources, time-to-market, operational overhead
+
+ 
+
+ 
+
+Options Considered
+Option 1: Fully Managed RAG Service
+Use a cloud provider's managed RAG solution that handles infrastructure, indexing, retrieval, and scaling automatically.
+
+Candidates:
+
+Vertex AI RAG Engine (Google Cloud)
+
+AWS Bedrock Knowledge Bases (Amazon)
+
+Azure AI Search (Microsoft)
+
+OpenAI Assistants API with File Search (OpenAI)
+
+Pros
+Zero Infrastructure Management: No servers, databases, or vector stores to maintain
+
+Auto-Scaling: Handles load spikes without manual intervention
+
+Built-in Optimization: Query rewriting, parallel search, automatic reranking
+
+Faster Time-to-Market: Reduces implementation complexity significantly
+
+Enterprise Features: Security, compliance, encryption, access control included
+
+Proven Reliability: Battle-tested infrastructure with SLA guarantees
+
+Automatic Updates: Improvements to retrieval algorithms without code changes
+
+Integrated Tooling: Monitoring, logging, debugging tools provided
+
+Cons
+Higher Recurring Cost: $100-300/month vs minimal self-hosted costs (which is elaborated in detail in the next section below)
+
+Vendor Lock-in: Tightly coupled to specific cloud provider
+
+Limited Customization: Cannot modify chunking strategies or embedding models in most cases
+
+Regional Constraints: May require data storage in specific regions (compliance risk)
+
+Black Box Retrieval: Less visibility into how retrieval decisions are made
+
+API Dependencies: System unavailable if provider has outages
+
+Pricing Uncertainty: Costs can increase with usage growth
+
+Cost Component Breakdown
+1. RagManagedDb (Spanner) - DOCUMENTED PRICING
+Official Documentation:
+
+"Basic tier offers a cost-effective and low-compute tier by setting the underlying Spanner instance to a fixed configuration of 100 processing units (0.1 nodes)" (Source: Understanding RagManagedDb)
+
+"With a three-year committed-use-discount of 40% applied to a 100 PUs regional Spanner instance in us-central1, the monthly bill will be less than $40/month" (Source: Google Cloud Blog)
+
+Pricing Tiers:
+
+
+
+TierProcessing UnitsConfigurationMonthly Cost (List Price)With 3-Year CUD (40% off)Basic100 PUs (0.1 nodes)Fixed~$65/month~$39/monthScaled1000-10,000 PUs (1-10 nodes)Auto-scaling$650-6,500/month$390-3,900/month
+Our Scenario: 100K queries/month, 100 tenants
+
+
+
+Recommended Tier: Basic (100 PUs)
+Reasoning: 
+- 100K queries/month = ~3,300 queries/day
+- ~138 queries/hour
+- 100 PUs sufficient for < 1,000 queries/hour
+- 100 tenants × 50 pages SOPs = ~500 MB metadata
+Estimated Cost: $39-65/month
+Our Estimate: $50/month (assuming no CUD initially)
+📊 Evidence: Spanner Pricing Calculator
+
+2. Vector Storage - DOCUMENTED PRICING
+Official Documentation:
+
+"Vertex AI RAG Engine is free to use. However, if you configure Vertex AI RAG Engine components, the billing might be affected." (Source: RAG Engine Billing)
+
+⚠️ Gap: Google does not publish explicit vector storage pricing for RAG Engine.
+
+Calculation Based on Storage:
+
+
+
+Assumptions:
+- 100 tenants
+- Each tenant: 50 pages of SOPs
+- Each page: ~500 tokens
+- Total tokens: 100 × 50 × 500 = 2.5 million tokens
+Document Processing:
+- 2.5M tokens ÷ 512 tokens per chunk = ~4,900 chunks
+- Each chunk → 768-dimensional vector (text-embedding-005)
+- Each vector: ~3 KB in storage
+Total Vector Storage:
+- 4,900 chunks × 3 KB = 14.7 MB
+- Round up to: 20 MB (with metadata)
+Storage Cost:
+- Google Cloud Storage (if used): $0.020 per GB/month
+- 0.02 GB × $0.020 = $0.0004/month (negligible)
+However: Vectors are stored in Spanner (RagManagedDb), not separate storage.
+
+Estimated Cost: $0 (included in Spanner tier cost above)
+
+3. Embedding Generation - DOCUMENTED PRICING
+Official Documentation:
+
+"Text Embeddings API pricing: $0.00002 per 1,000 characters" (Source: Vertex AI Pricing)
+
+Initial Ingestion (One-Time):
+
+
+
+SOP Documents:
+- 100 tenants × 50 pages = 5,000 pages
+- Each page: ~2,000 characters average
+- Total: 5,000 × 2,000 = 10 million characters
+Embedding Cost:
+- 10M characters ÷ 1,000 = 10,000 units
+- 10,000 × $0.00002 = $0.20
+One-Time Cost: $0.20
+Monthly Updates (Recurring):
+
+
+
+Assumption: 10% of tenants update SOPs monthly
+- 10 tenants × 50 pages × 2,000 chars = 1M characters
+- 1M ÷ 1,000 × $0.00002 = $0.02/month
+Monthly Recurring: $0.02/month (negligible)
+Query Embeddings (Per Query):
+
+
+
+Each query generates 1 embedding:
+- Average query: 100 characters
+- 100K queries × 100 chars = 10M characters/month
+- 10M ÷ 1,000 × $0.00002 = $0.20/month
+Monthly Recurring: $0.20/month
+Total Embedding Cost: $0.22/month (recurring) + $0.20 one-time
+
+📊 Evidence: Vertex AI Generative AI Pricing
+
+4. Retrieval Operations - ❌ NOT DOCUMENTED
+The Gap: Google does not publish per-query retrieval pricing for RAG Engine's retrieveContexts API.
+
+What We Know:
+
+The API retrieves relevant chunks from vector database
+
+Performs similarity search
+
+Returns top-k results (typically 5-10 chunks)
+
+Estimation Approaches:
+
+Approach A: Based on Compute Usage
+
+
+Assumption: Each retrieval uses ~0.001 vCPU-seconds
+- 100K queries × 0.001 vCPU-sec = 100 vCPU-seconds
+- At $0.10 per vCPU-hour: 100 ÷ 3600 × $0.10 = $0.0028
+Cost: <$1/month (negligible if this approach is correct)
+Approach B: Based on Comparable Services
+
+
+AWS Bedrock Knowledge Bases: ~$0.002 per retrieval
+Azure AI Search: ~$0.003 per query
+OpenAI Assistants (File Search): $2.50 per 1K calls = $0.0025/query
+Conservative Estimate: $0.003 per retrieval
+- 100K queries × $0.003 = $300/month
+Optimistic Estimate: $0.001 per retrieval
+- 100K queries × $0.001 = $100/month
+⚠️ Our Assumption: $0.002 per retrieval = $200/month
+
+Status: ❌ NOT OFFICIALLY DOCUMENTED - Requires validation
+
+5. Gemini Model Costs - DOCUMENTED PRICING (Unchanged)
+Official Documentation:
+
+"Gemini 2.5 Flash: Input $0.000075 per 1K tokens, Output $0.0003 per 1K tokens" (Source: Vertex AI Pricing)
+
+This cost exists regardless of RAG implementation.
+
+Calculation:
+
+
+
+Per Query Token Usage:
+- System instruction: 100 tokens
+- Retrieved SOP context: 500 tokens (avg)
+- User question: 50 tokens
+- Total input: 650 tokens
+- Output: 200 tokens (avg)
+Cost per Query:
+- Input: 650 ÷ 1000 × $0.000075 = $0.000049
+- Output: 200 ÷ 1000 × $0.0003 = $0.00006
+- Total: $0.000109 per query
+Monthly Cost (100K queries):
+- 100,000 × $0.000109 = $10.90/month
+Note: RAG increases input tokens by ~500 per query (retrieved context) Without RAG input: 150 tokens × 100K = 15M tokens = $1.13/month With RAG input: 650 tokens × 100K = 65M tokens = $4.88/month Additional cost due to RAG context: $3.75/month
+
+Total Gemini Cost: $10.90/month
+
+📊 Evidence: Vertex AI Generative AI Pricing
+
+ 
+
+ 
+
+Option 2: Self-Hosted RAG Solution
+Build a custom RAG pipeline using open-source components and existing infrastructure.
+
+Technology Options:
+
+Vector Database: Elasticsearch k-NN (existing cluster), Milvus, Weaviate, Qdrant
+
+Embedding Models: Sentence-Transformers, text-embedding-005 via API
+
+Orchestration: LangChain, Haystack, LlamaIndex
+
+Document Processing: PyPDF, Unstructured, custom chunking logic
+
+Pros
+Full Control: Customize every aspect of chunking, embedding, retrieval
+
+Data Sovereignty: Keep all data in Mumbai (ap-south-1)
+
+Lower Operational Cost: Only compute/storage costs, no managed service fees
+
+No Vendor Lock-in: Can switch components or migrate freely
+
+Transparency: Complete visibility into retrieval process
+
+Optimization Flexibility: Fine-tune for specific use case requirements
+
+Existing Infrastructure: Leverage current Elasticsearch cluster (10.1.2.175:9200)
+
+Integration Freedom: Works with any LLM provider (Gemini, Claude, GPT)
+
+Cons
+Higher Implementation Effort: Significantly more code to write and test
+
+Maintenance Burden: Ongoing updates, monitoring, scaling responsibility
+
+Operational Overhead: Monitoring, alerting, incident response needed
+
+Quality Risk: Self-built retrieval may not match managed service quality
+
+Time-to-Market: Takes longer to implement and stabilize
+
+Scaling Complexity: Manual capacity planning and optimization
+
+Feature Gap: May lack advanced features like query rewriting, reranking
+
+ 
+
+Implementation Components Required:
+
+Document Processing Pipeline
+
+PDF/DOC parsing
+
+Text extraction and cleaning
+
+Chunking strategy (fixed-size, semantic, hybrid)
+
+   
+
+Embedding Generation
+
+Model selection and hosting
+
+Batch processing for initial ingestion
+
+Real-time embedding for updates
+
+   
+
+Vector Storage and Indexing
+
+Elasticsearch k-NN configuration
+
+Index mapping and settings
+
+Shard and replica management
+
+   
+
+Retrieval Logic
+
+Similarity search implementation
+
+Filtering and ranking
+
+Result formatting
+
+   
+
+Integration Layer
+
+API endpoints for document management
+
+Query interface for retrieval
+
+Context injection into prompts
+
+   
+
+Operational Infrastructure
+
+Monitoring and alerting
+
+Backup and disaster recovery
+
+Performance optimization
+
+ 
+
+ 
+
+Comparison Matrix
+Aspect
+
+Managed Solution
+
+Self-Hosted Solution
+
+Implementation Complexity
+
+Low
+
+High
+
+Time to Production
+
+Shorter
+
+Longer
+
+Operational Overhead
+
+Minimal
+
+Significant
+
+Customization
+
+Limited
+
+Complete
+
+Recurring Cost
+
+Higher ($100-300/mo)
+
+Lower ($20-50/mo)
+
+Data Control
+
+Provider-dependent
+
+Full control
+
+Scaling
+
+Automatic
+
+Manual
+
+Maintenance
+
+Provider responsibility
+
+Team responsibility
+
+Feature Richness
+
+Advanced out-of-box
+
+Build as needed
+
+Quality Assurance
+
+Provider-tested
+
+Team-tested
+
+ 
+
+ 
+
+Decision
+Selected Option: Option 1 - Fully Managed RAG Service
+Specific Implementation: Vertex AI RAG Engine (Google Cloud)
+
+Reasoning
+Time-to-Market Priority: Business needs SOP compliance capabilities quickly to remain competitive
+
+Resource Constraints: Keeps implementation scope focused on RAG integration rather than expanding to include vector database operations and maintenance
+
+Gemini Integration: Vertex AI RAG Engine provides native integration with our existing Gemini 2.5 Flash models
+
+Quality Assurance: Google's proven retrieval algorithms reduce risk of poor accuracy in critical compliance use case
+
+Operational Excellence: Allows team to focus on business logic rather than vector search optimization
+
+Scalability Confidence: Auto-scaling ensures system works from 10 to 1000 tenants without re-architecture
+
+Feature Velocity: Advanced capabilities (query rewriting, reranking) available immediately without development
+
+Trade-offs to be Accepted
+Regional Constraint:
+
+Vertex AI RAG Engine requires us-east4 region (Virginia, USA)
+
+Data stored outside India: Requires legal/compliance review
+
+Additional latency: +200-400ms per query (Mumbai → Virginia → Mumbai)
+
+Mitigation: Document data flow in privacy policies; offer alternative for customers requiring India-only data
+
+Cost Impact:
+
+Estimated $150-300/month for managed service
+
+Higher than self-hosted but justified by reduced engineering overhead
+
+Mitigation: Set usage alerts and implement rate limiting per tenant
+
+Vendor Lock-in:
+
+Tight coupling to Google Cloud ecosystem
+
+Migration to alternative would require significant refactoring
+
+Mitigation: Design abstraction layer in code to isolate RAG implementation details
+
+ 
+
+ 
+
+Consequences
+Positive
+Faster Delivery: SOP compliance feature reaches customers sooner
+
+Lower Risk: Battle-tested infrastructure reduces production issues
+
+Better UX: Advanced retrieval improves response quality
+
+Predictable Costs: Clear pricing model aids budget planning
+
+Negative
+Recurring Cost: New monthly expense of $150-300
+
+Data Location: SOPs stored in US, not India
+
+Latency Impact: Additional 200-400ms per RAG query
+
+Limited Control: Cannot optimize retrieval algorithms ourselves
+
+Migration Complexity: Future self-hosting would require significant effort
+
+Neutral
+Configuration Changes Required:
+
+Update GOOGLE_REGION=us-east4 in env.prod
+
+Add RAG-specific environment variables
+
+Modify TenantConfig schema
+
+New API Endpoints Needed:
+
+Corpus management for tenants
+
+Document upload and deletion
+
+RAG configuration per tenant
+
+Code Integration Points:
+
+Update Query verb in verbs.py
+
+Add RAG retrieval before Gemini calls
+
+Enhance error handling for cross-region calls
+
+ 
+
+ 
+
+Alternatives Considered
+AWS Bedrock Knowledge Bases
+Why Not Selected:
+
+Requires switching from Gemini to Claude/Llama models
+
+Would necessitate rewriting entire LLM integration layer
+
+Team expertise is with Gemini, not Claude
+
+Could Reconsider If: Data residency becomes absolute requirement
+
+Azure AI Search
+Why Not Selected:
+
+Not fully managed RAG; requires orchestration code
+
+Optimized for Azure OpenAI, not Gemini
+
+Similar regional trade-offs without Gemini benefits
+
+Could Reconsider If: Multi-cloud strategy becomes priority
+
+OpenAI Assistants API (File Search)
+Why Not Selected:
+
+Only works with OpenAI GPT models
+
+Cannot use with existing Gemini integration
+
+Less enterprise features than Vertex AI
+
+Could Reconsider If: Switching to GPT models
+
+Self-Hosted RAG
+Why Not Selected:
+
+Longer implementation timeline
+
+Requires ongoing maintenance burden
+
+Initial quality may not match managed service
+
+Will Reconsider: After proving business value with managed solution, may migrate for cost optimization and data sovereignty
+
+ 
+
+ 
+
+Review and Reassessment
+Reassessment Triggers:
+
+Monthly costs exceed $500 consistently
+
+Data residency regulations change
+
+Customer complaints about latency/quality
+
+Engineering team capacity increases
+
+Gemini model availability changes
+
+Potential Path Forward:
+
+If successful: Continue with managed solution
+
+If cost becomes issue: Migrate to self-hosted RAG
+
+If regional constraint blocks customers: Maybe offer hybrid approach (managed + self-hosted options)
+
+ 
+
+ 
+
+References
+Vertex AI RAG Engine Documentation
+
+AWS Bedrock Knowledge Bases comparison analysis
+
+Azure AI Search evaluation
+
+Internal: CQA Infrastructure Documentation
+
+Internal: Cost Analysis Spreadsheet
