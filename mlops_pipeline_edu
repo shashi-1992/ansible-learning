@@ -1,0 +1,787 @@
+# simple_mlops_pipeline — full bundle
+# PIPELINE_ROOT (absolute): /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline
+# REPO_ROOT (absolute): /Users/shashidhara.reddy/Implementation
+# Generated (UTC): 2026-04-20T08:54:21.532864+00:00
+# Skipped dirs: .git, .venv, __pycache__
+# Skipped file: PROJECT_BUNDLE.txt (this output).
+# Binaries: Base64 between BEGIN_BASE64 / END_BASE64.
+
+=== /Users/shashidhara.reddy/Implementation/SIMPLE_MLOPS_PIPELINE_PROJECT.md ===
+# Simple MLOps pipeline — project document (single file)
+
+**Scope:** Everything about the local demo pipeline under `simple_mlops_pipeline/`: layout, run flow, code internals, artifacts, dependencies, reproducibility, extensions, and troubleshooting.
+
+**Code root:** `simple_mlops_pipeline/` (relative to this repo: `/Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/`).
+
+**Git (educational / classroom):** see `simple_mlops_pipeline/GIT_EDUCATION.md` — what to commit, what to ignore (`.venv`), optional `artifacts/` / `PROJECT_BUNDLE.txt`.
+
+---
+
+## 1. What this project is
+
+A **minimal, runnable** ML workflow that mimics production MLOps stages without external services:
+
+1. **Prepare** — materialize data to disk (audit trail).
+2. **Train** — fit a scikit-learn `Pipeline`, persist the estimator.
+3. **Evaluate** — score on held-out data, write metrics JSON.
+4. **Manifest** — write a small “registry” record (run id, paths, metrics snapshot).
+
+There is **no** orchestrator (Airflow / Argo), **no** experiment server (MLflow), **no** cloud storage, **no** feature store. Those are extension points (Section 12).
+
+---
+
+## 2. Repository layout
+
+```
+simple_mlops_pipeline/
+├── pipeline.py              # Single file: ARTIFACTS_DIR + all four stages + main
+├── requirements.txt         # Pinned minimum versions
+├── README.md                # Run + links to docs
+├── GIT_EDUCATION.md         # What to commit for Git (educational)
+├── .gitignore               # Ignores .venv, __pycache__, etc.
+├── build_project_bundle.py  # Builds PROJECT_BUNDLE.txt (optional)
+├── PROJECT_BUNDLE.txt       # Optional; regenerate, or omit from Git
+├── .venv/                   # Local env — not committed (see .gitignore)
+└── artifacts/               # Created on run; optional to commit for demos
+    ├── raw_sample.csv
+    ├── model.joblib
+    ├── metrics.json
+    └── run_manifest.json
+```
+
+**Single entrypoint:** `python pipeline.py` from inside `simple_mlops_pipeline/`.
+
+---
+
+## 3. End-to-end execution flow
+
+```
+main()
+  └─> stage_prepare()     → load Iris → write raw_sample.csv → return (X, y)
+  └─> stage_train(X,y)    → train_test_split → Pipeline.fit → model.joblib → return (model, X_test, y_test)
+  └─> stage_evaluate(...) → predict → metrics.json → return metrics dict
+  └─> stage_manifest(...) → run_manifest.json
+```
+
+**Ordering invariant:** evaluate uses the **same** `X_test`, `y_test` produced in `stage_train` (no second random split). That keeps offline metrics aligned with the saved model’s training run.
+
+**Side effects:** All writes go under `artifacts/` next to `pipeline.py` (`ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"`).
+
+---
+
+## 4. Stage internals
+
+### 4.1 Prepare (`stage_prepare`)
+
+| Item | Detail |
+|------|--------|
+| **Data source** | `sklearn.datasets.load_iris` with `return_X_y=True`, `as_frame=True` → `X` is a `DataFrame` of 4 numeric features; `y` is a `Series` of integer class labels 0,1,2. |
+| **CSV written** | `X.copy()` plus column `target` → `raw_sample.csv` (150 rows + header). |
+| **Why write CSV** | Proves the “data snapshot” pattern for audits / replay; swap this for Parquet or versioned lake paths in production. |
+| **Directory** | `ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)` ensures idempotent mkdir. |
+
+**Iris schema (conceptual):**
+
+| Column | Role |
+|--------|------|
+| `sepal length (cm)` | Feature |
+| `sepal width (cm)` | Feature |
+| `petal length (cm)` | Feature |
+| `petal width (cm)` | Feature |
+| `target` | Label 0/1/2 (species) |
+
+---
+
+### 4.2 Train (`stage_train`)
+
+| Item | Detail |
+|------|--------|
+| **Split** | `train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)` → 80% train, 20% test; **stratify** preserves class proportions (important for small multiclass data). |
+| **Estimator** | `sklearn.pipeline.Pipeline([("scale", StandardScaler()), ("clf", LogisticRegression(...))])`. |
+| **Scaling** | `StandardScaler` — zero mean, unit variance per feature **using train statistics only** (fitted on `X_train`; applied to `X_test` via the same pipeline on `predict`). |
+| **Classifier** | `LogisticRegression(max_iter=200, random_state=42)` — multinomial logistic regression for 3 classes (default `multi_class` behavior with `lbfgs` solver for multiclass). |
+| **Persistence** | `joblib.dump(model, .../model.joblib)` — stores fitted pipeline (numpy arrays, sparse matrices if any, hyperparameters). |
+| **Return** | `(model, X_test, y_test)` for a single evaluate pass. |
+
+**Internal predict path (high level):**
+
+1. `StandardScaler.transform` on input features.
+2. `LogisticRegression.predict` (argmax over class scores / probabilities depending on implementation details).
+
+**Reproducibility knobs:** `random_state=42` on both split and classifier reduces variance across runs on the same code + data.
+
+---
+
+### 4.3 Evaluate (`stage_evaluate`)
+
+| Item | Detail |
+|------|--------|
+| **Predictions** | `y_pred = model.predict(X_test)` — uses pipeline’s fitted scaler + classifier. |
+| **accuracy** | `sklearn.metrics.accuracy_score(y_test, y_pred)` — fraction of exact label matches (multiclass). |
+| **macro_f1** | `classification_report(..., output_dict=True)["macro avg"]["f1-score"]` — unweighted mean of per-class F1 scores (each class weighted equally regardless of support). |
+| **Output** | `metrics.json` UTF-8, indented JSON. |
+
+**Why both accuracy and macro-F1:** On balanced Iris, they track similarly; in imbalanced production data, macro-F1 often surfaces minority-class failure modes that accuracy hides.
+
+---
+
+### 4.4 Manifest (`stage_manifest`)
+
+| Field | Meaning |
+|-------|---------|
+| `run_id` | UTC timestamp `YYYYMMDDThhmmssZ` from `datetime.now(timezone.utc)` — human-sortable, collision-prone under sub-second parallel runs (fine for a demo). |
+| `model_path` | Absolute or project-relative string to `model.joblib` at write time. |
+| `metrics` | Copy of the dict written to `metrics.json` (duplication is intentional for a self-contained manifest). |
+| `python` | `sys.version.split()[0]` — documents interpreter major.minor.patch for debugging “works on my machine”. |
+
+**Not included (by design):** git SHA, dependency lockfile hash, dataset version, signature of features, data drift stats, model card URL.
+
+---
+
+## 5. Artifacts — file formats and contracts
+
+### 5.1 `raw_sample.csv`
+
+- Header row; 150 data rows for default Iris load.
+- **Contract:** Any replacement data source in `stage_prepare` should keep a stable schema or update downstream training code.
+
+### 5.2 `model.joblib`
+
+- Python `pickle`-compatible blob managed by **joblib** (efficient for numpy-heavy objects).
+- **Security:** Only `joblib.load` models from **trusted** origins; unpickling untrusted files can execute arbitrary code.
+
+### 5.3 `metrics.json` (example shape)
+
+```json
+{
+  "accuracy": 0.9333333333333333,
+  "macro_f1": 0.9333333333333332
+}
+```
+
+Values are JSON floats; exact digits may vary slightly with library / CPU / BLAS.
+
+### 5.4 `run_manifest.json` (example shape)
+
+```json
+{
+  "run_id": "20260420T083045Z",
+  "model_path": "/.../simple_mlops_pipeline/artifacts/model.joblib",
+  "metrics": { "accuracy": ..., "macro_f1": ... },
+  "python": "3.12.x"
+}
+```
+
+---
+
+## 6. How to run (local)
+
+```bash
+cd simple_mlops_pipeline
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python pipeline.py
+```
+
+**Expected stdout:** four bracketed stage lines ending in `Done.`
+
+**Rerun behavior:** Overwrites the same four artifact files in `artifacts/` (no versioning folders yet).
+
+---
+
+## 7. Dependencies and why each exists
+
+| Package | Role in this project |
+|---------|----------------------|
+| **pandas** | `DataFrame` / `Series` from `load_iris(as_frame=True)`; `to_csv` for raw snapshot. |
+| **scikit-learn** | Dataset loader, split, preprocessing, model, metrics, `Pipeline`. |
+| **joblib** | Serialize / deserialize the fitted `Pipeline` to `model.joblib`. |
+
+**Version floor (`requirements.txt`):** `pandas>=2.0.0`, `scikit-learn>=1.3.0`, `joblib>=1.3.0` — chosen for broadly available APIs; bump after testing if you need newer estimators.
+
+**Coupling note:** `model.joblib` produced with sklearn **joblib** should be loaded with a **compatible** sklearn major version in production to avoid subtle scoring or predict differences.
+
+---
+
+## 8. Reproducibility and determinism
+
+| Factor | Current behavior |
+|--------|------------------|
+| Random split | Fixed `random_state=42`. |
+| Classifier | Fixed `random_state=42`. |
+| Data | Fixed built-in Iris (unless you change the loader). |
+| Floating point | OS / BLAS can still cause tiny metric differences across machines. |
+| Timestamps | `run_id` changes every run. |
+
+For **stricter** reproducibility: add `requirements.lock` or `uv.lock` / `poetry.lock`, pin OS, and record `numpy` / `scipy` versions (pulled in transitively by sklearn).
+
+---
+
+## 9. CI/CD pattern (snippet)
+
+Example GitHub Actions job (conceptual):
+
+```yaml
+- uses: actions/setup-python@v5
+  with:
+    python-version: "3.12"
+- run: pip install -r simple_mlops_pipeline/requirements.txt
+- run: python simple_mlops_pipeline/pipeline.py
+- run: test -f simple_mlops_pipeline/artifacts/metrics.json
+```
+
+**Quality gate (example):** parse `metrics.json` and fail the job if `accuracy < 0.90` (tune threshold to your data).
+
+---
+
+## 10. Observability hooks (not implemented)
+
+What production pipelines usually add:
+
+- Structured logging (JSON logs) per stage with duration.
+- OpenTelemetry spans around train and evaluate.
+- Push metrics to Prometheus (`accuracy`, `train_duration_seconds`).
+- Emit events to Kafka / SNS on manifest write.
+
+---
+
+## 11. Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---------|----------------|------------|
+| `ModuleNotFoundError: sklearn` | venv not activated or deps not installed | `pip install -r requirements.txt` |
+| ConvergenceWarning from LogisticRegression | `max_iter` too low for harder data | Increase `max_iter` or tune `C` / solver. |
+| Different accuracy on two laptops | Different sklearn/numpy builds | Lock dependencies; compare `run_manifest.json` `python` + `pip freeze`. |
+| `joblib.load` fails on deploy | Train / serve sklearn mismatch | Align versions or export to ONNX for serve-side independence. |
+| Empty `artifacts/` | Run failed before write | Check traceback; ensure write permissions to project dir. |
+
+---
+
+## 12. Roadmap to “real” MLOps (same stages, harder infra)
+
+| Stage | Production-oriented upgrade |
+|-------|-----------------------------|
+| Prepare | Read from warehouse / S3 / Delta; validate schema with **pandera** or **Great Expectations**; write dataset version URI. |
+| Train | **MLflow** / **W&B** tracking; hyperparameter search; GPU training; distributed frameworks. |
+| Evaluate | Holdout + cross-validation; fairness metrics; calibration curves; export reports to HTML/PDF. |
+| Manifest | Model registry (**MLflow Model Registry**, SageMaker, Vertex); **sign** artifacts; store **SBOM** + docker digest. |
+| Orchestration | **Airflow**, **Prefect**, **Dagster**, **Argo Workflows**, **Kubeflow Pipelines**. |
+| Deploy | **FastAPI** + `joblib.load` at startup, or **TorchServe** / **Triton** if you change model format; **canary** via traffic split. |
+
+---
+
+## 13. Code map (quick reference)
+
+| Symbol | Location | Role |
+|--------|----------|------|
+| `ARTIFACTS_DIR` | `pipeline.py` | `Path(__file__).parent / "artifacts"` |
+| `stage_prepare` | `pipeline.py` | Iris → CSV |
+| `stage_train` | `pipeline.py` | split → fit → `model.joblib` |
+| `stage_evaluate` | `pipeline.py` | `metrics.json` |
+| `stage_manifest` | `pipeline.py` | `run_manifest.json` |
+| `main` | `pipeline.py` | Sequencing only |
+
+---
+
+## 14. Single-file summary
+
+This document is the **full project spec** for `simple_mlops_pipeline`: one Python module, four stages, four artifacts, three declared dependencies, local-only execution, and a clear path to wire in data versioning, experiment tracking, orchestration, and model serving when you outgrow the demo.
+
+---
+
+*Generated for the Implementation workspace. Update this file when `pipeline.py` or artifact contracts change.*
+
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/.gitignore ===
+# Local Python environment (re-create with: python3 -m venv .venv && pip install -r requirements.txt)
+.venv/
+venv/
+
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS noise
+.DS_Store
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/GIT_EDUCATION.md ===
+# Git — educational use
+
+This folder is a **small teaching example**: one pipeline script, deps, optional bundle export, and generated `artifacts/` after you run `python pipeline.py`.
+
+## What to commit (typical)
+
+| Path | Commit? | Note |
+|------|---------|------|
+| `pipeline.py` | Yes | All logic |
+| `requirements.txt` | Yes | Reproducible installs |
+| `README.md` | Yes | How to run |
+| `build_project_bundle.py` | Yes | Regenerate `PROJECT_BUNDLE.txt` |
+| `../SIMPLE_MLOPS_PIPELINE_PROJECT.md` | Yes | Full spec (repo root) |
+| `.gitignore` | Yes | Keeps `.venv` out of Git |
+| `artifacts/` | Optional | Educational: commit if you want a “already ran once” demo; skip if you prefer clean clones that always run the pipeline fresh |
+| `PROJECT_BUNDLE.txt` | Optional | Regenerate with `python3 build_project_bundle.py`; commit if you want one file to share in class |
+
+## What not to commit (still recommended)
+
+- **`.venv/`** — large, machine-specific; peers recreate from `requirements.txt`.
+
+## First-time clone (for students)
+
+```bash
+cd simple_mlops_pipeline
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python pipeline.py
+```
+
+No API keys or secrets are involved; safe for public educational repos.
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/README.md ===
+# Simple MLOps pipeline (local)
+
+Full project spec, internals, artifacts, CI, troubleshooting: **`../SIMPLE_MLOPS_PIPELINE_PROJECT.md`** (repo root).
+
+Git / what to commit (educational): **`GIT_EDUCATION.md`**.
+
+Quick run:
+
+```bash
+cd simple_mlops_pipeline
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && python pipeline.py
+```
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/artifacts/metrics.json ===
+{
+  "accuracy": 0.9333333333333333,
+  "macro_f1": 0.9333333333333332
+}
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/artifacts/model.joblib ===
+<binary 1873 bytes — Base64 below (decode to recreate original file)>
+BEGIN_BASE64
+gAWVdgEAAAAAAACMEHNrbGVhcm4ucGlwZWxpbmWUjAhQaXBlbGluZZSTlCmBlH2UKIwFc3RlcHOU
+XZQojAVzY2FsZZSMG3NrbGVhcm4ucHJlcHJvY2Vzc2luZy5fZGF0YZSMDlN0YW5kYXJkU2NhbGVy
+lJOUKYGUfZQojAl3aXRoX21lYW6UiIwId2l0aF9zdGSUiIwEY29weZSIjBFmZWF0dXJlX25hbWVz
+X2luX5SME2pvYmxpYi5udW1weV9waWNrbGWUjBFOdW1weUFycmF5V3JhcHBlcpSTlCmBlH2UKIwI
+c3ViY2xhc3OUjAVudW1weZSMB25kYXJyYXmUk5SMBXNoYXBllEsEhZSMBW9yZGVylIwBQ5SMBWR0
+eXBllGgXjAVkdHlwZZSTlIwCTziUiYiHlFKUKEsDjAF8lE5OTkr/////Sv////9LP3SUYowKYWxs
+b3dfbW1hcJSJjBtudW1weV9hcnJheV9hbGlnbm1lbnRfYnl0ZXOUSxB1YoAFldgAAAAAAAAAjBZu
+dW1weS5fY29yZS5tdWx0aWFycmF5lIwMX3JlY29uc3RydWN0lJOUjAVudW1weZSMB25kYXJyYXmU
+k5RLAIWUQwFilIeUUpQoSwFLBIWUaAOMBWR0eXBllJOUjAJPOJSJiIeUUpQoSwOMAXyUTk5OSv//
+//9K/////0s/dJRiiV2UKIwRc2VwYWwgbGVuZ3RoIChjbSmUjBBzZXBhbCB3aWR0aCAoY20plIwR
+cGV0YWwgbGVuZ3RoIChjbSmUjBBwZXRhbCB3aWR0aCAoY20plGV0lGIulakAAAAAAAAAjA5uX2Zl
+YXR1cmVzX2luX5RLBIwPbl9zYW1wbGVzX3NlZW5flIwWbnVtcHkuX2NvcmUubXVsdGlhcnJheZSM
+BnNjYWxhcpSTlGggjAJmOJSJiIeUUpQoSwOMATyUTk5OSv////9K/////0sAdJRiQwgAAAAAAABe
+QJSGlFKUjAVtZWFuX5RoEymBlH2UKGgWaBloGksEhZRoHGgdaB5oL2gmiGgnSxB1Ygn/////////
+///f3d3d3V0XQGXJL5b8YghAJ1yPwvUoDkBC4XoUrkfzP5UqAAAAAAAAAIwEdmFyX5RoEymBlH2U
+KGgWaBloGksEhZRoHGgdaB5oL2gmiGgnSxB1Ygz///////////////8DmJT3wHDmP0Usi/4fick/
+UjAqqRPQCEALQ/e/NnXiP5UsAAAAAAAAAIwGc2NhbGVflGgTKYGUfZQoaBZoGWgaSwSFlGgcaB1o
+HmgvaCaIaCdLEHViCv////////////9qmuiMGszqP+1OWZPuldw/vydw8Jwt/D89ifngpk3oP5WO
+AQAAAAAAAIwQX3NrbGVhcm5fdmVyc2lvbpSMBTEuOC4wlHVihpSMA2NsZpSMHnNrbGVhcm4ubGlu
+ZWFyX21vZGVsLl9sb2dpc3RpY5SMEkxvZ2lzdGljUmVncmVzc2lvbpSTlCmBlH2UKIwHcGVuYWx0
+eZSMCmRlcHJlY2F0ZWSUaB1HP/AAAAAAAACMCGwxX3JhdGlvlEcAAAAAAAAAAIwEZHVhbJSJjAN0
+b2yURz8aNuLrHEMtjA1maXRfaW50ZXJjZXB0lIiMEWludGVyY2VwdF9zY2FsaW5nlEsBjAxjbGFz
+c193ZWlnaHSUTowMcmFuZG9tX3N0YXRllEsqjAZzb2x2ZXKUjAVsYmZnc5SMCG1heF9pdGVylEvI
+jAd2ZXJib3NllEsAjAp3YXJtX3N0YXJ0lImMBm5fam9ic5ROaChLBIwIY2xhc3Nlc1+UaBMpgZR9
+lChoFmgZaBpLA4WUaBxoHWgeaCCMAmk4lImIh5RSlChLA2gwTk5OSv////9K/////0sAdJRiaCaI
+aCdLEHViCP//////////AAAAAAAAAAABAAAAAAAAAAIAAAAAAAAAlU8AAAAAAAAAjAduX2l0ZXJf
+lGgTKYGUfZQoaBZoGWgaSwGFlGgcaB1oHmggjAJpNJSJiIeUUpQoSwNoME5OTkr/////Sv////9L
+AHSUYmgmiGgnSxB1Yg////////////////////8QAAAAlS0AAAAAAAAAjAVjb2VmX5RoEymBlH2U
+KGgWaBloGksDSwSGlGgcaB1oHmgvaCaIaCdLEHViBf//////tTN4h1Fs8b+GNrCJJ2PwPzBCsQnv
+yPy/+mNhasr6+r8skMg+qynhP5wJtf03Ete/L6naVRofyr/YaN2zyNrpvzvXJ9D3ruE/S+iFFDM9
+5b+rSzYqaQYAQDIMKGIX9ANAlTAAAAAAAAAAjAppbnRlcmNlcHRflGgTKYGUfZQoaBZoGWgaSwOF
+lGgcaB1oHmgvaCaIaCdLEHViBv///////8OmBZy7jtO/mhnLiXGJ/j/ir8miwqX5v5UwAAAAAAAA
+AGhBaEJ1YoaUZYwPdHJhbnNmb3JtX2lucHV0lE6MBm1lbW9yeZROaFaJaEFoQnViLg==
+END_BASE64
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/artifacts/raw_sample.csv ===
+sepal length (cm),sepal width (cm),petal length (cm),petal width (cm),target
+5.1,3.5,1.4,0.2,0
+4.9,3.0,1.4,0.2,0
+4.7,3.2,1.3,0.2,0
+4.6,3.1,1.5,0.2,0
+5.0,3.6,1.4,0.2,0
+5.4,3.9,1.7,0.4,0
+4.6,3.4,1.4,0.3,0
+5.0,3.4,1.5,0.2,0
+4.4,2.9,1.4,0.2,0
+4.9,3.1,1.5,0.1,0
+5.4,3.7,1.5,0.2,0
+4.8,3.4,1.6,0.2,0
+4.8,3.0,1.4,0.1,0
+4.3,3.0,1.1,0.1,0
+5.8,4.0,1.2,0.2,0
+5.7,4.4,1.5,0.4,0
+5.4,3.9,1.3,0.4,0
+5.1,3.5,1.4,0.3,0
+5.7,3.8,1.7,0.3,0
+5.1,3.8,1.5,0.3,0
+5.4,3.4,1.7,0.2,0
+5.1,3.7,1.5,0.4,0
+4.6,3.6,1.0,0.2,0
+5.1,3.3,1.7,0.5,0
+4.8,3.4,1.9,0.2,0
+5.0,3.0,1.6,0.2,0
+5.0,3.4,1.6,0.4,0
+5.2,3.5,1.5,0.2,0
+5.2,3.4,1.4,0.2,0
+4.7,3.2,1.6,0.2,0
+4.8,3.1,1.6,0.2,0
+5.4,3.4,1.5,0.4,0
+5.2,4.1,1.5,0.1,0
+5.5,4.2,1.4,0.2,0
+4.9,3.1,1.5,0.2,0
+5.0,3.2,1.2,0.2,0
+5.5,3.5,1.3,0.2,0
+4.9,3.6,1.4,0.1,0
+4.4,3.0,1.3,0.2,0
+5.1,3.4,1.5,0.2,0
+5.0,3.5,1.3,0.3,0
+4.5,2.3,1.3,0.3,0
+4.4,3.2,1.3,0.2,0
+5.0,3.5,1.6,0.6,0
+5.1,3.8,1.9,0.4,0
+4.8,3.0,1.4,0.3,0
+5.1,3.8,1.6,0.2,0
+4.6,3.2,1.4,0.2,0
+5.3,3.7,1.5,0.2,0
+5.0,3.3,1.4,0.2,0
+7.0,3.2,4.7,1.4,1
+6.4,3.2,4.5,1.5,1
+6.9,3.1,4.9,1.5,1
+5.5,2.3,4.0,1.3,1
+6.5,2.8,4.6,1.5,1
+5.7,2.8,4.5,1.3,1
+6.3,3.3,4.7,1.6,1
+4.9,2.4,3.3,1.0,1
+6.6,2.9,4.6,1.3,1
+5.2,2.7,3.9,1.4,1
+5.0,2.0,3.5,1.0,1
+5.9,3.0,4.2,1.5,1
+6.0,2.2,4.0,1.0,1
+6.1,2.9,4.7,1.4,1
+5.6,2.9,3.6,1.3,1
+6.7,3.1,4.4,1.4,1
+5.6,3.0,4.5,1.5,1
+5.8,2.7,4.1,1.0,1
+6.2,2.2,4.5,1.5,1
+5.6,2.5,3.9,1.1,1
+5.9,3.2,4.8,1.8,1
+6.1,2.8,4.0,1.3,1
+6.3,2.5,4.9,1.5,1
+6.1,2.8,4.7,1.2,1
+6.4,2.9,4.3,1.3,1
+6.6,3.0,4.4,1.4,1
+6.8,2.8,4.8,1.4,1
+6.7,3.0,5.0,1.7,1
+6.0,2.9,4.5,1.5,1
+5.7,2.6,3.5,1.0,1
+5.5,2.4,3.8,1.1,1
+5.5,2.4,3.7,1.0,1
+5.8,2.7,3.9,1.2,1
+6.0,2.7,5.1,1.6,1
+5.4,3.0,4.5,1.5,1
+6.0,3.4,4.5,1.6,1
+6.7,3.1,4.7,1.5,1
+6.3,2.3,4.4,1.3,1
+5.6,3.0,4.1,1.3,1
+5.5,2.5,4.0,1.3,1
+5.5,2.6,4.4,1.2,1
+6.1,3.0,4.6,1.4,1
+5.8,2.6,4.0,1.2,1
+5.0,2.3,3.3,1.0,1
+5.6,2.7,4.2,1.3,1
+5.7,3.0,4.2,1.2,1
+5.7,2.9,4.2,1.3,1
+6.2,2.9,4.3,1.3,1
+5.1,2.5,3.0,1.1,1
+5.7,2.8,4.1,1.3,1
+6.3,3.3,6.0,2.5,2
+5.8,2.7,5.1,1.9,2
+7.1,3.0,5.9,2.1,2
+6.3,2.9,5.6,1.8,2
+6.5,3.0,5.8,2.2,2
+7.6,3.0,6.6,2.1,2
+4.9,2.5,4.5,1.7,2
+7.3,2.9,6.3,1.8,2
+6.7,2.5,5.8,1.8,2
+7.2,3.6,6.1,2.5,2
+6.5,3.2,5.1,2.0,2
+6.4,2.7,5.3,1.9,2
+6.8,3.0,5.5,2.1,2
+5.7,2.5,5.0,2.0,2
+5.8,2.8,5.1,2.4,2
+6.4,3.2,5.3,2.3,2
+6.5,3.0,5.5,1.8,2
+7.7,3.8,6.7,2.2,2
+7.7,2.6,6.9,2.3,2
+6.0,2.2,5.0,1.5,2
+6.9,3.2,5.7,2.3,2
+5.6,2.8,4.9,2.0,2
+7.7,2.8,6.7,2.0,2
+6.3,2.7,4.9,1.8,2
+6.7,3.3,5.7,2.1,2
+7.2,3.2,6.0,1.8,2
+6.2,2.8,4.8,1.8,2
+6.1,3.0,4.9,1.8,2
+6.4,2.8,5.6,2.1,2
+7.2,3.0,5.8,1.6,2
+7.4,2.8,6.1,1.9,2
+7.9,3.8,6.4,2.0,2
+6.4,2.8,5.6,2.2,2
+6.3,2.8,5.1,1.5,2
+6.1,2.6,5.6,1.4,2
+7.7,3.0,6.1,2.3,2
+6.3,3.4,5.6,2.4,2
+6.4,3.1,5.5,1.8,2
+6.0,3.0,4.8,1.8,2
+6.9,3.1,5.4,2.1,2
+6.7,3.1,5.6,2.4,2
+6.9,3.1,5.1,2.3,2
+5.8,2.7,5.1,1.9,2
+6.8,3.2,5.9,2.3,2
+6.7,3.3,5.7,2.5,2
+6.7,3.0,5.2,2.3,2
+6.3,2.5,5.0,1.9,2
+6.5,3.0,5.2,2.0,2
+6.2,3.4,5.4,2.3,2
+5.9,3.0,5.1,1.8,2
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/artifacts/run_manifest.json ===
+{
+  "run_id": "20260420T084031Z",
+  "model_path": "/Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/artifacts/model.joblib",
+  "metrics": {
+    "accuracy": 0.9333333333333333,
+    "macro_f1": 0.9333333333333332
+  },
+  "python": "3.14.4"
+}
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/build_project_bundle.py ===
+#!/usr/bin/env python3
+"""
+Walk simple_mlops_pipeline/ and write one text file:
+  - Absolute paths at top / per section
+  - Repo-root SIMPLE_MLOPS_PIPELINE_PROJECT.md (if present)
+  - Every file under this folder; binaries as Base64 (reconstructable)
+"""
+from __future__ import annotations
+
+import base64
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
+OUT = ROOT / "PROJECT_BUNDLE.txt"
+SKIP_DIRS = {".venv", "__pycache__", ".git"}
+SKIP_FILES = {"PROJECT_BUNDLE.txt"}
+TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".csv", ".yml", ".yaml", ".toml", ".ini", ".cfg"}
+MAX_TEXT_BYTES = 512_000
+MAX_BINARY_EMBED_BYTES = 5 * 1024 * 1024
+
+EXTRA_PATHS: list[Path] = [REPO_ROOT / "SIMPLE_MLOPS_PIPELINE_PROJECT.md"]
+
+
+def is_probably_text(path: Path, data: bytes) -> bool:
+    if path.suffix.lower() in TEXT_SUFFIXES:
+        return True
+    if b"\x00" in data[:8192]:
+        return False
+    try:
+        data[:8192].decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def append_section(lines: list[str], file_path: Path, raw: bytes) -> None:
+    lines.append(f"=== {file_path.resolve()} ===")
+    if len(raw) > MAX_BINARY_EMBED_BYTES:
+        lines.append(f"<omitted: {len(raw)} bytes (exceeds MAX_BINARY_EMBED_BYTES)>\n")
+        return
+
+    suffix = file_path.suffix.lower()
+    force_b64 = suffix in {".joblib", ".pkl", ".pickle"}
+
+    if force_b64:
+        lines.append(f"<binary {len(raw)} bytes — Base64 below (decode to recreate original file)>")
+        lines.append("BEGIN_BASE64")
+        b64 = base64.standard_b64encode(raw).decode("ascii")
+        for i in range(0, len(b64), 76):
+            lines.append(b64[i : i + 76])
+        lines.append("END_BASE64\n")
+        return
+
+    if len(raw) > MAX_TEXT_BYTES:
+        lines.append(f"<omitted: {len(raw)} bytes (exceeds MAX_TEXT_BYTES)>\n")
+        return
+
+    if is_probably_text(file_path, raw):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        if text is not None:
+            if not text.endswith("\n"):
+                text += "\n"
+            lines.append(text)
+            return
+
+    lines.append(f"<non-utf8 text/binary {len(raw)} bytes — Base64>")
+    lines.append("BEGIN_BASE64")
+    b64 = base64.standard_b64encode(raw).decode("ascii")
+    for i in range(0, len(b64), 76):
+        lines.append(b64[i : i + 76])
+    lines.append("END_BASE64\n")
+
+
+def main() -> None:
+    lines: list[str] = []
+    lines.append("# simple_mlops_pipeline — full bundle")
+    lines.append(f"# PIPELINE_ROOT (absolute): {ROOT}")
+    lines.append(f"# REPO_ROOT (absolute): {REPO_ROOT}")
+    lines.append(f"# Generated (UTC): {datetime.now(timezone.utc).isoformat()}")
+    lines.append("# Skipped dirs: " + ", ".join(sorted(SKIP_DIRS)))
+    lines.append("# Skipped file: PROJECT_BUNDLE.txt (this output).")
+    lines.append("# Binaries: Base64 between BEGIN_BASE64 / END_BASE64.")
+    lines.append("")
+
+    extra_n = 0
+    for extra in EXTRA_PATHS:
+        if extra.is_file():
+            extra_n += 1
+            append_section(lines, extra, extra.read_bytes())
+            lines.append("")
+
+    paths = sorted(
+        p
+        for p in ROOT.rglob("*")
+        if p.is_file()
+        and not any(part in SKIP_DIRS for part in p.relative_to(ROOT).parts)
+    )
+
+    n = 0
+    for path in paths:
+        if path.name in SKIP_FILES:
+            continue
+        n += 1
+        append_section(lines, path, path.read_bytes())
+
+    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(
+        f"Wrote {OUT.resolve()} "
+        f"({n} files under pipeline + {extra_n} extra doc(s); {OUT.stat().st_size} bytes)"
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/pipeline.py ===
+#!/usr/bin/env python3
+"""
+Minimal MLOps-style pipeline: prepare -> train -> evaluate -> persist artifacts.
+All logic lives in this single file. Run: python pipeline.py
+"""
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import joblib
+import pandas as pd
+from sklearn.datasets import load_iris
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
+
+
+def stage_prepare() -> tuple[pd.DataFrame, pd.Series]:
+    print("[1/4] prepare: load data")
+    X, y = load_iris(return_X_y=True, as_frame=True)
+    df = X.copy()
+    df["target"] = y
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    df.to_csv(ARTIFACTS_DIR / "raw_sample.csv", index=False)
+    print(f"      wrote {ARTIFACTS_DIR / 'raw_sample.csv'}")
+    return X, y
+
+
+def stage_train(
+    X: pd.DataFrame, y: pd.Series
+) -> tuple[Pipeline, pd.DataFrame, pd.Series]:
+    print("[2/4] train: split + fit pipeline")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    model = Pipeline(
+        [
+            ("scale", StandardScaler()),
+            ("clf", LogisticRegression(max_iter=200, random_state=42)),
+        ]
+    )
+    model.fit(X_train, y_train)
+    joblib.dump(model, ARTIFACTS_DIR / "model.joblib")
+    print(f"      saved {ARTIFACTS_DIR / 'model.joblib'}")
+    return model, X_test, y_test
+
+
+def stage_evaluate(
+    model: Pipeline, X_test: pd.DataFrame, y_test: pd.Series
+) -> dict[str, Any]:
+    print("[3/4] evaluate")
+    y_pred = model.predict(X_test)
+    acc = float(accuracy_score(y_test, y_pred))
+    report = classification_report(y_test, y_pred, output_dict=True)
+    metrics = {
+        "accuracy": acc,
+        "macro_f1": float(report["macro avg"]["f1-score"]),
+    }
+    with open(ARTIFACTS_DIR / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"      accuracy={acc:.4f}  (metrics -> {ARTIFACTS_DIR / 'metrics.json'})")
+    return metrics
+
+
+def stage_manifest(metrics: dict[str, Any]) -> None:
+    print("[4/4] manifest (lightweight 'registry')")
+    manifest = {
+        "run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "model_path": str(ARTIFACTS_DIR / "model.joblib"),
+        "metrics": metrics,
+        "python": sys.version.split()[0],
+    }
+    path = ARTIFACTS_DIR / "run_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"      wrote {path}")
+    print("Done.")
+
+
+def main() -> None:
+    X, y = stage_prepare()
+    model, X_test, y_test = stage_train(X, y)
+    metrics = stage_evaluate(model, X_test, y_test)
+    stage_manifest(metrics)
+
+
+if __name__ == "__main__":
+    main()
+
+=== /Users/shashidhara.reddy/Implementation/simple_mlops_pipeline/requirements.txt ===
+pandas>=2.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
