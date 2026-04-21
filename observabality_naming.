@@ -1,0 +1,269 @@
+# Observability naming — holistic guide (metrics, logs, traces, K8s, LLM)
+
+**Purpose:** One place to align **names**, **labels**, **tags**, and **attributes** across Prometheus, Grafana, ELK/OpenSearch, OpenTelemetry, Kubernetes, and **LLM cost** events so dashboards, alerts, and traces join cleanly.
+
+**Principles:** low **cardinality** on labels, **stable** keys, **hierarchical** scope (`env` → `service` → `component`), **one correlation story** (`trace_id` everywhere it fits).
+
+---
+
+## 1. Hierarchy (always decide this first)
+
+Use the same mental model everywhere; only the *syntax* changes (`.` vs `_` vs nested JSON).
+
+| Level | Meaning | Typical values |
+|-------|---------|----------------|
+| **organization** | Company or billing org | `acme`, `org_01H...` |
+| **environment** | Blast radius | `dev`, `staging`, `prod` |
+| **region** | Cloud region | `ap-south-1`, `sgp` |
+| **service** | Deployable unit (owns SLO) | `voice-api`, `llm-gateway` |
+| **component** | Submodule / library area | `transcription`, `sentiment`, `billing` |
+| **instance** | Process / pod (optional on metrics) | pod name, host — **often high cardinality: use with care** |
+
+**Rule:** `environment`, `service`, `region` are safe on almost all metrics. **Put `user_id`, `session_id`, `request_id` in logs/traces**, not as Prometheus label series unless you accept cardinality explosion.
+
+---
+
+## 2. Naming conventions (cross-system)
+
+| Topic | Convention | Example |
+|-------|------------|---------|
+| **Case** | Prometheus: **snake_case** metric names; labels **snake_case**. OTel attributes: **snake_case** (dot namespaces optional). K8s labels: **kebab-case** keys are common; values often lowercase. |
+| **Units** | Suffix metric base name with unit (Prometheus style) | `http_server_duration_seconds`, `llm_tokens_input_total` |
+| **Counters** | `_total` suffix (Prometheus) | `llm_invocations_total` |
+| **Histograms** | `_bucket`, `_sum`, `_count` | `http_request_duration_seconds_bucket` |
+| **Avoid** | Changing label *names* after dashboards depend on them | Version with `schema_version` in log body, not in label churn |
+
+---
+
+## 3. Prometheus — metrics and labels
+
+### 3.1 What goes in the **metric name** vs **labels**
+
+| In metric name | In labels |
+|----------------|-----------|
+| *What* is measured (domain + unit) | *Who / where / which class* (low cardinality) |
+| `llm_tokens_input_total` | `service`, `environment`, `model_id` |
+| `http_server_requests_total` | `method`, `route` (bounded set), `status` |
+
+### 3.2 Recommended **label set** (baseline)
+
+Use consistently on all application metrics:
+
+```
+environment
+region
+service
+component    # optional but useful for LLM vs HTTP vs worker
+deployment   # git sha or image tag — low churn if one release per deploy
+```
+
+### 3.3 **LLM / cost** metrics (align with `LLM_COST_TRACKING_GEMINI_ELK_DESIGN.md`)
+
+| Metric name (example) | Type | Labels (keep small) |
+|------------------------|------|------------------------|
+| `llm_invocations_total` | Counter | `environment`, `service`, `component`, `model_id`, `outcome` (`success`, `parser_failed`, `retry_exhausted`) |
+| `llm_tokens_input_total` | Counter | same + optional `pass_index` only if values ∈ {1,2} |
+| `llm_tokens_output_total` | Counter | same |
+| `llm_tokens_thinking_total` | Counter | same (omit metric if provider never exposes thinking) |
+| `llm_estimated_cost_usd_total` | Counter | same — **float money**: use minimal decimals or store **micro-dollars** as integer counter |
+| `llm_invocation_duration_seconds` | Histogram | same without `outcome` on histogram if cardinality high — or narrow `outcome` to 3 values |
+
+**Never** as Prometheus labels: `flow_id`, `user_id`, `request_id`, raw `audio_file_name` (unless strongly bounded).
+
+### 3.4 Cardinality checklist
+
+- [ ] Label cardinality **< 10k** active series per metric (rule of thumb).
+- [ ] `route` or `handler` is an **enum** of known paths, not raw URL with IDs.
+- [ ] `model_id` is a **small catalog** of model names, not full model version strings that change daily unless you need that (then use `deployment` for version).
+
+---
+
+## 4. Logs — ECS-style fields for ELK / OpenSearch
+
+Use **ECS** (Elastic Common Schema) where possible so Kibana default dashboards and cross-team queries work.
+
+### 4.1 Core ECS (every log line should try to have)
+
+| ECS field | Your content |
+|-----------|----------------|
+| `@timestamp` | Event time (UTC). |
+| `message` | Human line (optional if JSON-only). |
+| `log.level` | `info`, `warn`, `error`. |
+| `service.name` | Same as Prometheus `service`. |
+| `service.version` | Image tag / git short sha. |
+| `service.environment` | `dev` / `staging` / `prod`. |
+| `cloud.region` | If applicable. |
+| `trace.id` | W3C trace id (hex). |
+| `span.id` | Current span id. |
+| `transaction.id` | Optional business transaction. |
+| `error.type`, `error.message`, `error.stack_trace` | On failures. |
+
+### 4.2 **Custom namespace** for LLM (prefix avoids ECS collisions)
+
+Use a single prefix: **`llm.`** nested object or flat keys with `llm_` prefix (pick one style per index and stick to it).
+
+| Field | Type | Notes |
+|-------|------|--------|
+| `llm.module` | keyword | e.g. `voice.sentiment` |
+| `llm.function` | keyword | Callable / operation name |
+| `llm.model_id` | keyword | Provider model string |
+| `llm.flow_id` | keyword | **OK in logs** (high cardinality acceptable in logs, not in metric labels) |
+| `llm.pass_index` | byte | 1 or 2 for dual audio pass |
+| `llm.tokens.input` | long | |
+| `llm.tokens.output` | long | |
+| `llm.tokens.thinking` | long | nullable |
+| `llm.estimated_cost_usd` | double | |
+| `llm.rate_card_version` | keyword | e.g. `2026-04-20` |
+| `llm.attempt` | byte | Retry attempt |
+| `llm.retry_reason` | keyword | `429`, `timeout`, `parser_failed` |
+| `llm.hard_reset` | boolean | |
+| `llm.structured_parse_ok` | boolean | |
+| `llm.outcome` | keyword | `success`, `parser_failed`, `retry_exhausted` |
+| `llm.latency_ms` | long | |
+| `event.dataset` | keyword | e.g. `llm.invocation` — for ILM / dashboard filters |
+
+**PII:** Prefer `audio.content_sha256`, `audio.duration_sec`, not raw audio in logs unless approved.
+
+---
+
+## 5. OpenTelemetry — traces and span attributes
+
+### 5.1 Span **names** (OTel: not high cardinality)
+
+Use **static** span names: `llm.gemini.invoke`, `audio.transcribe`, `http.server.request`.
+
+Put dynamic bits in **attributes**, not in the span name string.
+
+### 5.2 Recommended **attributes** (mirror logs/metrics)
+
+| Attribute | Example |
+|-----------|---------|
+| `service.name` | OTel resource |
+| `deployment.environment` | resource |
+| `llm.model_id` | span attribute |
+| `llm.module` | span attribute |
+| `llm.function` | span attribute |
+| `gen_ai.system` | `vertex_ai` / `gemini` (see OTel GenAI semconv drafts if you adopt them) |
+| `gen_ai.request.model` | if using emerging conventions |
+
+**Child spans:** Under one `trace_id`, chain `Pass1` → `Pass2` as child spans with `llm.pass_index` attribute.
+
+---
+
+## 6. Kubernetes — labels and annotations
+
+### 6.1 **Labels** (selector / scheduling; keep small and stable)
+
+| Key | Value example | Use |
+|-----|----------------|-----|
+| `app.kubernetes.io/name` | `voice-api` | Standard K8s |
+| `app.kubernetes.io/component` | `worker` | |
+| `app.kubernetes.io/instance` | `voice-api-prod-sgp` | |
+| `tags.datadoghq.com/env` | `prod` | If using Datadog tags style |
+| `tags.datadoghq.com/service` | `voice-api` | |
+
+### 6.2 **Annotations** (metadata, not selectors)
+
+| Key | Value |
+|-----|--------|
+| `prometheus.io/scrape` | `true` |
+| `prometheus.io/port` | `8080` |
+| `prometheus.io/path` | `/metrics` |
+
+Do not duplicate high-cardinality data in labels; use annotations or external CMDB.
+
+---
+
+## 7. Grafana — variables and dashboard tags
+
+| Concept | Naming |
+|---------|--------|
+| Dashboard **tag** | `service:voice-api`, `team:platform`, `domain:llm` |
+| **Template variable** | `$environment`, `$service`, `$region` — match Prometheus label names exactly |
+| **Folder** | `Prod / Voice` or `LLM / Cost` |
+
+---
+
+## 8. Correlation — one story across systems
+
+| ID | Where |
+|----|--------|
+| **trace_id** | OTel trace, log `trace.id`, optional HTTP header propagation |
+| **span_id** | OTel, log `span.id` |
+| **request_id** / **correlation_id** | HTTP header `X-Request-Id`, log field `http.request.id` or custom |
+| **flow_id** | Business pipeline (e.g. dual audio pass) — **logs + traces**; link to metrics via **exemplars** if you use Prometheus exemplars on histograms |
+
+**Log line at LLM exit must contain:** `trace.id` + `llm.flow_id` + `service.name` so Kibana → trace UI works.
+
+---
+
+## 9. Alerting labels (Alertmanager / similar)
+
+Align with Prometheus **external labels** on the server:
+
+```
+environment=prod
+region=ap-south-1
+team=voice
+severity=warning|critical
+```
+
+Route on `service`, `team`, `severity`; **inhibit** duplicate pages using `alertname` + `instance` rules you already document in `PROMETHEUS_MONITORING.md`.
+
+---
+
+## 10. Quick reference card (copy-paste)
+
+```
+# Prometheus (examples)
+llm_invocations_total{environment,region,service,component,model_id,outcome}
+llm_tokens_input_total{environment,region,service,component,model_id}
+
+# ECS log (examples)
+service.name, service.environment, trace.id, span.id
+llm.module, llm.function, llm.model_id, llm.flow_id, llm.estimated_cost_usd, llm.outcome
+
+# OTel span
+name: llm.gemini.invoke
+attributes: llm.model_id, llm.module, llm.function, llm.pass_index
+
+# K8s
+labels: app.kubernetes.io/name, app.kubernetes.io/component
+annotations: prometheus.io/scrape, prometheus.io/path
+```
+
+---
+
+## 11. Anti-patterns (do not)
+
+| Don’t | Why |
+|-------|-----|
+| Prometheus label `user_id` | Millions of series → TSDB death |
+| Metric name `llm_cost_service_prod_gemini_flash` | Encode dimensions in name → label explosion across renames |
+| Different `service` spelling per system (`voiceapi` vs `voice-api`) | Joins break in unified observability |
+| Log field `User` vs `user` vs `USER` | Case chaos in Kibana |
+
+---
+
+## 12. How this ties to your other docs
+
+| Doc | Link |
+|-----|------|
+| LLM cost + ELK + retries | `LLM_COST_TRACKING_GEMINI_ELK_DESIGN.md` |
+| Prometheus alerts / lifecycle | `PROMETHEUS_MONITORING.md` |
+| EKS logging / addons | `EKS_MONITORING_LOGGING_ADDONS.md` |
+
+---
+
+## 13. Rollout checklist
+
+1. Pick **one** `service.name` catalog and register services in a table (Confluence / YAML).
+2. Add **resource** attributes in OTel SDK (env, service, region) once at startup.
+3. Add **Prometheus** `external_labels` matching `environment` + `region`.
+4. Create **Elasticsearch index template** for `logs-*` with `llm.*` field mappings as `keyword` / `long` / `double`.
+5. Add **Grafana** dashboard variables bound to the same label names as Prometheus.
+6. Review **cardinality** after one week of prod traffic.
+
+---
+
+*Holistic naming doc for Implementation workspace. Adjust prefixes (`llm.` vs `gen_ai.`) when you adopt official OpenTelemetry GenAI semantic conventions.*
