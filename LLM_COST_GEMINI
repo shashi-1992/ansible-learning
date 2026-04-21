@@ -1,0 +1,246 @@
+# LLM cost tracking, Gemini usage, ELK logging, and reliability — design doc (single file)
+
+**Purpose:** Capture a high-level architecture for **per-function / per-module LLM cost**, **Gemini-style billing dimensions** (input, output, thinking), **cost-aware logging to ELK**, **retry and hard-reset policy**, **thinking-token limits**, **audio / accuracy / cost tradeoffs**, and **structured-output failure** handling.
+
+**Audience:** Platform / backend engineers implementing observability and cost controls around LLM calls.
+
+---
+
+## 1. Goals (what “good” looks like)
+
+| Goal | Description |
+|------|-------------|
+| **Attribution** | Know **which function / module / flow** spent how much (tokens + estimated currency). |
+| **Transparency** | Split cost by **input tokens**, **output tokens**, and **thinking / reasoning** tokens where the provider bills them separately. |
+| **Observability** | Emit one structured log per LLM invocation (or per stage) into **ELK** for dashboards, alerts, and chargeback. |
+| **Control** | Cap **thinking** (or equivalent hidden reasoning) usage so “unlimited thinking” cannot blow the budget. |
+| **Resilience** | On failure: bounded **retries**, **hard reset** window, then re-send; long tail covered by **4h**-style retry horizon where applicable. |
+| **Quality vs cost** | For **audio** paths: optional **second pass** (e.g. re-send or refine) for **accuracy** (silences, tones, sentiment) with explicit **cost tradeoff**. |
+| **Correctness** | **Structured output**: define **parser** and **failure** when schema validation fails — do not silently treat garbage as success. |
+
+---
+
+## 2. Conceptual architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Application / Voice / NLP service                               │
+│  ┌──────────────┐    ┌──────────────────┐    ┌─────────────────┐ │
+│  │ business fn  │───▶│ LLM wrapper      │───▶│ Gemini (or API) │ │
+│  │ (module tag) │    │ cost + limits    │    │                 │ │
+│  └──────────────┘    │ + structured out │    └────────┬────────┘ │
+│                      │ + retry policy   │             │          │
+│                      └────────┬─────────┘             │          │
+└───────────────────────────────┼──────────────────────┼──────────┘
+                                │ usage metadata       │
+                                ▼                       ▼
+                        ┌───────────────┐       ┌───────────────┐
+                        │ Cost estimator │       │ Provider     │
+                        │ (rates table)  │       │ usage API /  │
+                        └───────┬────────┘       │ response hdrs│
+                                │               └───────────────┘
+                                ▼
+                        ┌───────────────┐
+                        │ Log shipper   │──▶ Elasticsearch / Kibana
+                        │ (JSON fields) │    (dashboards, alerts)
+                        └───────────────┘
+```
+
+**Core pattern:** *Pass function (or callable) → wrapper measures tokens / latency → computes **estimated_cost** → logs to ELK → returns result or raises structured failure.*
+
+---
+
+## 3. Cost model — “function / code modules cost (based on cost)”
+
+### 3.1 Dimensions to record (per invocation)
+
+| Field (example) | Meaning |
+|-----------------|--------|
+| `service` / `deployment` | Owning service name. |
+| `module` | Python module or package (e.g. `voice.sentiment`). |
+| `function` | Callable name (e.g. `transcribe_and_analyze`). |
+| `flow_id` / `trace_id` | Correlate multi-step pipelines (e.g. same audio twice). |
+| `model_id` | e.g. `gemini-2.x-flash`. |
+| `input_tokens` | Billable prompt tokens (incl. system + user + tool definitions as billed). |
+| `output_tokens` | Generated completion tokens. |
+| `thinking_tokens` | If API exposes **thinking / reasoning** usage separately (Gemini family may surface distinct usage categories — **confirm against current API docs**). |
+| `audio_seconds` / `audio_bytes` | If audio is sent as input (for unit economics). |
+| `invocation_count` | Same logical request split into N API calls (e.g. “send audio twice”). |
+| `estimated_cost_usd` | `f(input, output, thinking, model_rate_card)` — see §3.3. |
+| `latency_ms` | Wall time (separate from token cost; useful for SLOs). |
+
+### 3.2 Why “module + function”
+
+Chargeback and optimization need **stable labels** from code, not only “model X”. Enforce decorators or context managers so every LLM path sets `module` + `function` (and optional `feature` tag).
+
+### 3.3 Rate card (implementation note)
+
+- Maintain a **versioned rate table** (YAML/JSON or DB): per `model_id`, price per 1M input / output / thinking (if separately priced).
+- **Recompute** `estimated_cost_usd` at log time from token counts + table version (`rate_card_version` in log) so historical logs stay interpretable after price changes.
+- **Official pricing** changes often — link to provider docs in runbooks; do not hardcode only in code without version.
+
+---
+
+## 4. Gemini: thinking, input, output
+
+**Intent:** Gemini (and similar models) may report or imply usage across:
+
+- **Input** — prompt + multimodal parts (e.g. audio attachments encoded per API rules).
+- **Output** — model text (and structured JSON if returned as text).
+- **Thinking / reasoning** — internal reasoning tokens when the product exposes them and bills them (policy varies by model tier and API version).
+
+**Implementation checklist**
+
+1. Read **response metadata** (and any **usage** object) from the SDK for every call.
+2. Map SDK fields → your canonical `input_tokens`, `output_tokens`, `thinking_tokens` (nullable if not applicable).
+3. If **thinking** is not returned separately, document as `null` and attribute all completion to `output_tokens` until the API evolves.
+4. Log raw usage JSON (nested) in ELK for audit, plus flattened numeric fields for aggregations.
+
+---
+
+## 5. “Pass function and get the cost and log in ELK”
+
+### 5.1 Wrapper contract (pseudocode)
+
+```text
+with llm_invocation(module=..., function=..., flow_id=...):
+    result, usage = call_gemini(...)
+    cost = rate_table.estimate(usage, model_id)
+    elk.emit({
+      "@timestamp": ...,
+      "event.dataset": "llm.invocation",
+      "llm.module": module,
+      "llm.function": function,
+      "llm.model_id": ...,
+      "llm.tokens.input": ...,
+      "llm.tokens.output": ...,
+      "llm.tokens.thinking": ...,
+      "llm.estimated_cost_usd": cost,
+      "llm.success": true/false,
+      "llm.structured_parse_ok": true/false,
+      ...
+    })
+    return result
+```
+
+### 5.2 ELK-friendly practices
+
+- One **ECS-aligned** index or data stream (e.g. `logs-llm-invocation-*`) with explicit field mapping for costs and token integers.
+- **Avoid** logging full prompts/audio in clear text if PII / retention policies forbid it; log **hashes**, **lengths**, and **IDs** instead when required.
+- Dashboards: cost by `module`, by `function`, by `model_id`, burn rate per day, p95 latency, failure rate.
+
+---
+
+## 6. Optimization: sending audio twice (accuracy vs cost)
+
+**Idea:** A single long audio pass might miss **silences**, **tone**, or **sentiment** nuances; a **second** pass (different prompt, chunking, or model) can improve accuracy at **~2×** media + token cost.
+
+**Design pattern**
+
+| Step | Behavior |
+|------|----------|
+| **Pass 1** | Cheaper or faster model / prompt; produce transcript + coarse labels. |
+| **Gate** | If confidence low or silence-heavy regions detected → trigger **Pass 2**. |
+| **Pass 2** | Stronger model or silence-aware segmentation + sentiment/tone focus. |
+| **Log** | Same `flow_id`; `llm.pass_index` = 1 or 2; sum costs in Kibana per `flow_id`. |
+
+**Cost control:** Make Pass 2 **opt-in** via config (per tenant / per queue) and daily **budget caps** (fail closed or degrade to Pass 1 only).
+
+---
+
+## 7. Thinking tokens: “unlimited passed → we limited it”
+
+**Problem:** If the API allows large or unbounded **thinking** budget, spend can spike unpredictably.
+
+**Mitigations**
+
+| Control | Description |
+|---------|-------------|
+| **Hard cap** | SDK / API parameter: max thinking budget or equivalent (when supported). |
+| **Server-side default** | Lowest safe default in config; override per use case with approval. |
+| **Pre-flight estimate** | If API supports max tokens only, set `maxOutputTokens` + thinking cap together. |
+| **Alerting** | ELK alert when `thinking_tokens` p99 or sum per hour exceeds threshold. |
+| **Kill switch** | Feature flag to disable thinking-heavy models globally. |
+
+Log: `llm.thinking_tokens`, `llm.thinking_cap_applied` (boolean), `llm.model_tier`.
+
+---
+
+## 8. Retry policy: “4hr retry, 3 retry for 10 min hard reset and send again”
+
+Interpretation (concrete policy you can implement as code):
+
+| Layer | Policy |
+|-------|--------|
+| **Short window** | Up to **3** retry attempts within a **10 minute** window for transient errors (429, 503, timeout). |
+| **Hard reset** | After exhausting short retries OR on non-retryable parser failure, **wait / backoff** then treat as new attempt: reset client state if needed (new connection, clear partial buffers, new `attempt_id`). |
+| **Long horizon** | For async / queue workers: allow a **job-level** retry up to **4 hours** total (e.g. re-queue with exponential backoff capped at 4h) before marking **dead** and alerting humans. |
+
+**Log fields:** `llm.attempt`, `llm.retry_reason`, `llm.hard_reset`, `llm.job_age_seconds`, final `llm.outcome` (`success` | `retry_exhausted` | `parser_failed` | `budget_exceeded`).
+
+**Idempotency:** For paid APIs, use **idempotency keys** where supported so hard reset + resend does not double-charge the same logical operation (provider-dependent).
+
+---
+
+## 9. Failure: parser + structured output
+
+**Problem:** LLM returns text that is *almost* JSON; naive `json.loads` fails or partial parses hide bugs.
+
+**Pattern**
+
+1. **Define schema** (JSON Schema, Pydantic model, or protobuf).
+2. **Primary path:** Request **JSON mode / structured output** from the API if available.
+3. **Parser:** Strict parse → validate against schema → **typed** domain object.
+4. **On failure:** Do not return half-parsed objects; return **`StructuredOutputFailure`** with:
+   - `raw_text_hash` or truncated `raw_text_preview` (policy-safe length),
+   - `parse_error`, `schema_version`,
+   - `llm.request_id` / provider id,
+   - optional **single repair** LLM call (bounded) — log separately as `llm.invocation_kind = repair_parse`.
+
+**ELK:** `llm.structured_parse_ok: false` + error class; alert if rate > SLO.
+
+---
+
+## 10. End-to-end flow (audio + dual pass + cost + failure)
+
+```text
+1. Ingest audio → assign flow_id
+2. Pass 1 (wrapped) → log cost/tokens to ELK
+3. If gate: Pass 2 (wrapped) → log with same flow_id, pass_index=2
+4. Structured output (sentiment / tones / segments) → parser validate
+5. On parser failure → log failure, apply retry policy (§8); optional repair invocation
+6. Aggregate costs in Kibana per module / per flow_id
+```
+
+---
+
+## 11. Implementation backlog (suggested order)
+
+1. **Rate card** + cost function + unit tests (known token counts → expected USD).
+2. **Wrapper** + mandatory `module` / `function` tags.
+3. **ELK** index template + sample dashboard JSON (or Kibana saved objects export).
+4. **Thinking cap** + config + alerts.
+5. **Retry / hard reset** middleware (idempotency where possible).
+6. **Structured output** + parser failures + repair path (optional, capped).
+7. **Audio dual-pass** gate + feature flags + per-tenant budget.
+
+---
+
+## 12. Risks and open questions
+
+| Risk | Mitigation |
+|------|------------|
+| Provider changes token accounting | Version `rate_card` and log provider SDK version. |
+| PII in logs | Redact / hash; separate security review for ELK retention. |
+| Double billing on retry | Idempotency keys; dedupe by `flow_id` + `pass_index` in business logic. |
+| “4h / 3 retries / 10m” ambiguity | Lock policy in YAML reviewed by SRE; document exact exception classes that retry. |
+
+---
+
+## 13. One-line summary
+
+**Wrap every LLM call**, record **Gemini (or equivalent) input / output / thinking** usage, **estimate cost** from a **versioned rate card**, **log structured events to ELK**, **cap thinking**, use **bounded retries with hard reset**, treat **structured parse failure** as a first-class outcome, and **optionally run a second audio pass** when accuracy justifies the extra cost.
+
+---
+
+*Design note only — verify all billing fields and caps against your provider’s current API documentation before production rollout.*
