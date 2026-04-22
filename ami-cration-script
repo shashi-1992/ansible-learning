@@ -1,0 +1,2390 @@
+# ami-creation — full tree bundle
+# ROOT (absolute): /Users/shashidhara.reddy/infra_code/ami-creation
+# Generated (UTC): 2026-04-22T07:57:11.593179+00:00
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/.pkr.hcl ===
+packer {
+  required_plugins {
+    amazon = {
+      source  = "github.com/hashicorp/amazon"
+      version = "~> 1"
+    }
+  }
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/Makefile ===
+# Configuration
+PACKER_VERSION := 1.11.2
+BIN_DIR := ./bin
+PACKER_BIN := $(BIN_DIR)/packer
+AWSM_DIR := ./awsm
+
+# Targets
+.PHONY: all ami mum sgp packer install-packer mum-eks sgp-eks integration-eks awsm install-awsm packer install-packer ireland-eks
+
+# Default target: run all
+all: awsm packer integration-eks mum-eks sgp-eks integration mum sgp
+
+packer:
+	@if [ ! -f "$(PACKER_BIN)" ]; then \
+		$(MAKE) install-packer; \
+	fi
+
+awsm:
+	@if [ ! -f "$(AWSM_DIR)" ]; then \
+		$(MAKE) install-awsm; \
+	fi
+
+install-packer:
+	@echo "Installing Packer $(PACKER_VERSION)..."
+	@mkdir -p $(BIN_DIR)
+	@curl -sL https://releases.hashicorp.com/packer/$(PACKER_VERSION)/packer_$(PACKER_VERSION)_linux_amd64.zip -o /tmp/packer.zip
+	@unzip -o /tmp/packer.zip -d $(BIN_DIR)
+	@chmod +x $(PACKER_BIN)
+	@rm /tmp/packer.zip
+	@echo "Packer installed to $(PACKER_BIN)"
+
+install-awsm:
+	@echo "Installing AWSM"
+	@mkdir -p $(AWSM_DIR)
+	@cp -r ../scripts/awsm .
+	@echo "AWSM copied to $(AWSM_DIR)"
+	@cp ./awsm/awsm ./scripts/init/files/awsm
+	@echo "AWSM copied to Scripts for AMI"
+	@cp ./awsm/ross ./scripts/init/files/ross
+	@echo "ROSS copied to Scripts for AMI"
+
+mum-eks: packer awsm
+	@echo "Creating AMI for MUM EKS Environment"
+	@chmod +x ./build-ami.sh
+	AWS_REGION=ap-south-1 ./build-ami.sh \
+		-c mum \
+		-v vpc-mum \
+		-e prod \
+		-s Private_Subnet_a \
+		-r prod-ec2-role \
+		-t "exotel-mum-eks-aps1.json"
+
+sgp-eks: packer awsm
+	@echo "Creating AMI for SGP EKS Environment"
+	@chmod +x ./build-ami.sh
+	AWS_REGION=ap-southeast-1 ./build-ami.sh \
+		-c sgp \
+		-v Exotel \
+		-e prod \
+		-s ex-prod-pub-1a \
+		-r jenkins-prod-build-node \
+		-t "exotel-sgp-eks-apse1.json"
+
+integration-eks: packer awsm
+	@echo "Building AMI For QA/Integration Environment"
+	@chmod +x ./build-ami.sh
+	AWS_REGION=us-west-2 ./build-ami.sh \
+		-c integration \
+		-v vpc_us3-requestor \
+		-e qa \
+		-s bastion-us3-private-us-west-2b \
+		-r qa_ec2_role \
+		-t "exotel-integration-eks-usw2.json"
+
+# ─────────────────────────────
+mum: packer awsm
+	@echo "Creating AMI for MUM Environment"
+	@chmod +x ./build-ami.sh
+	AWS_REGION=ap-south-1 ./build-ami.sh \
+		-c mum \
+		-v vpc-mum \
+		-e mum \
+		-s Private_Subnet_a \
+		-r prod-ec2-role \
+		-t "exotel-mum-aps1.json"
+
+sgp: packer awsm
+	@echo "Creating AMI for SGP Environment"
+	@chmod +x ./build-ami.sh
+	AWS_REGION=ap-southeast-1 ./build-ami.sh \
+		-c sgp \
+		-v Exotel \
+		-e prod \
+		-s ex-prod-pub-1a \
+		-r jenkins-prod-build-node \
+		-t "exotel-sgp-apse1.json"
+
+ireland-eks: packer awsm
+	@echo "Creating AMI for Ireland EKS 1.32 Environment"
+	@chmod +x ./build-ami.sh
+	AWS_REGION=eu-west-1 ./build-ami.sh \
+		-c ireland \
+		-v eu-west-1-vpc \
+		-e ireland \
+		-s PrivateSubnet-1 \
+		-r prod-ec2-role \
+		-t "exotel-ireland-eks-euw1.json"
+
+integration: packer awsm
+	@echo "Building AMI For QA/Integration Environment"
+	@chmod +x ./build-ami.sh
+	./build-ami.sh \
+		-c integration \
+		-v vpc_us3-requestor \
+		-e qa \
+		-s bastion-us3-private-us-west-2b \
+		-r qa_ec2_role \
+		-t "exotel-integration-usw2.json"
+
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/Makefile.mermaid ===
+%%{ init: { "flowchart": { "nodeSpacing": 120, "rankSpacing": 100 } } }%%
+flowchart TD
+
+  ALL["all (default target)"]
+
+  subgraph Setup
+    PACKER_BIN_CHECK["Check: bin/packer exists?"]
+    AWSM_DIR_CHECK["Check: ./awsm exists?"]
+    INSTALL_PACKER["install-packer"]
+    INSTALL_AWSM["install-awsm"]
+    PACKER_BIN_CHECK -->|no| INSTALL_PACKER
+    AWSM_DIR_CHECK -->|no| INSTALL_AWSM
+  end
+
+  subgraph Tool_Setup
+    PACKER_BIN["Packer binary"]
+    AWSM_DIR["AWSM scripts"]
+  end
+
+  subgraph EKS_Builds
+    MUM_EKS["mum-eks (MUM EKS)"]
+    SGP_EKS["sgp-eks (SGP EKS)"]
+    INT_EKS["integration-eks (Integration EKS)"]
+  end
+
+  subgraph Env_Builds
+    MUM["mum (MUM AMI)"]
+    SGP["sgp (SGP AMI)"]
+    INT["integration (QA/Integration AMI)"]
+  end
+
+  ALL --> AWSM_DIR_CHECK
+  ALL --> PACKER_BIN_CHECK
+
+  ALL --> INT_EKS
+  ALL --> MUM_EKS
+  ALL --> SGP_EKS
+
+  ALL --> INT
+  ALL --> MUM
+  ALL --> SGP
+
+  INSTALL_AWSM --> AWSM_DIR
+  INSTALL_PACKER --> PACKER_BIN
+
+  INT_EKS -->|"Region: us-west-2 | @params"| build_ami_qa_eks["invoke build-ami.sh"]
+  MUM_EKS -->|"Region: ap-south-1| @params "| build_ami_mum_eks["invoke build-ami.sh"]
+  SGP_EKS -->|"Region: ap-southeast-1 @params"| build_ami_sgp_eks["invoke build-ami.sh"]
+
+  INT -->|"Region: us-west-2 | @params"| build_ami_qa["invoke build-ami.sh"]
+  MUM -->|"Region: ap-south-1 | @params"| build_ami_mum["invoke build-ami.sh"]
+  SGP -->|"Region: ap-southeast-1 | @params"| build_ami_sgp["invoke build-ami.sh"]
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/Packer.mermaid ===
+flowchart LR
+
+  %% === Initiation Subgraph ===
+  subgraph INITIATION [Initiation]
+    direction TB
+    I1[Start: Packer Build Triggered]
+    I2[Load Variables from Environment]
+    I3[Define Builder Settings]
+    I4[Filter Source AMI by EKS Version]
+    I5[Filter VPC by Tags]
+    I6[Select Most Free Subnet]
+    I7[Choose t2.micro]
+    I8[Assign IAM + Encrypt Boot]
+    I9[Tag Instance, Volumes, Runs]
+
+    I1 --> I2
+    I2 --> I3
+    I3 --> I4
+    I4 --> I5
+    I5 --> I6
+    I6 --> I7
+    I7 --> I8
+    I8 --> I9
+  end
+
+  %% === Operation Subgraph ===
+  subgraph OPERATION [Operation]
+    direction TB
+    O1[cloud-init status --wait]
+    O2[Copy ./scripts to /tmp/]
+    O3[Run init/init.sh]
+    O4[Run setup.sh with ENV]
+    O5[Run set-facts.sh]
+    O6[Run mgmt/init.sh]
+    O7[Run mgmt/setup.sh]
+    O8[Run reloads.sh]
+    O9[Run packages.sh]
+    O10[Run wazuh-installation.sh]
+
+    O1 --> O2
+    O2 --> O3
+    O3 --> O4
+    O4 --> O5
+    O5 --> O6
+    O6 --> O7
+    O7 --> O8
+    O8 --> O9
+    O9 --> O10
+  end
+
+  %% === Cleanup Subgraph ===
+  subgraph CLEANUP [Cleanup & Finalization]
+    direction TB
+    C1[Delete /tmp/scripts]
+    C2[Trigger AMI Creation]
+    C3[Copy AMI to Region]
+    C4[Terminate EC2 Instance]
+    C5[Delete Temp Security Group]
+    C6[Done! AMI Ready]
+
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+    C4 --> C5
+    C5 --> C6
+  end
+
+  %% === Connections Between Subgraphs ===
+  INITIATION ==> OPERATION
+  OPERATION ==> CLEANUP
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/README.md ===
+### Packer AMI Creation
+
+Using packer create AMI for EKS related usecase
+
+```
+make packer
+make qa
+make sgp
+make mum
+```
+
+These commands must be run in the Individual stamp's servers, as they bring up an EC2 instance for setup
+Add `-debug` parameter for debugging the packer creations
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/build-ami.sh ===
+#!/usr/bin/env bash
+set -euo pipefail
+
+export BUILD_NUMBER=$(date +%s)
+
+if [ -n "${DEBUG:-}" ]; then
+    export ENABLE_DEBUG=" -debug "
+else
+    export ENABLE_DEBUG=" "
+fi
+help_function() {
+    echo "Usage:source $0 [-c Cluster] [-v VPC_Name] [-e Environment] [-s Subnet] [-r Packer Role for Instance] [-t Template]"
+    echo ""
+    echo "Create the AMI for Specific Environment for Exotel"
+    echo "Supported environments for now: integration, sgp, mum"
+    echo "Options:"
+    echo "  -c  Cluster to build the AMI (required)"
+    echo "  -v  VPC to use for creating the instance for AMI Creation (required)"
+    echo "  -e  Environment Name for AMI Creation (required)"
+    echo "  -s  Subnet for the instance (required)"
+    echo "  -r  Role for the instance created by packer (required)"
+    echo "  -t  Template for the AMI Creation"
+    echo "  -h  Display this help message"
+    echo "Example: bash $0 -c qa -v vpc_us3-requestor -e qa -s bastion-us3-private-us-west-2b -r qa_ec2_role -t 'exotel-qa-eks-usw2.json'"
+}
+
+while getopts "c:v:e:s:r:t: h" flag
+do
+    case "${flag}" in
+        c) export CLUSTER=${OPTARG};;
+        v) export VPC_NAME="${OPTARG}";;
+        e) export ENVIRONMENT="${OPTARG}";;
+        s) export SUBNET_NAME="${OPTARG}";;
+        r) export PACKER_ROLE="${OPTARG}";;
+        t) export TEMPLATE="${OPTARG}";;
+        h) help_function;exit 0;;
+        *) echo "Undefined option: ${flag}";;
+    esac
+done
+
+
+if [[ -z "${CLUSTER:-}" || -z "${VPC_NAME:-}" || -z "${ENVIRONMENT:-}" || -z "${SUBNET_NAME:-}" || -z "${PACKER_ROLE:-}" || -z "${TEMPLATE:-}" ]]; then
+  echo "❌ Missing required arguments."
+  help_function
+fi
+
+echo "🔨 Starting AMI build with:"
+echo "  Cluster:     $CLUSTER"
+echo "  VPC:         $VPC_NAME"
+echo "  Environment: $ENVIRONMENT"
+echo "  Subnet:      $SUBNET_NAME"
+echo "  IAM Role:    $PACKER_ROLE"
+echo "  Template:    $TEMPLATE"
+echo "  Build #:     $BUILD_NUMBER"
+echo
+echo "─────────────────────────────"
+./bin/packer init .
+./bin/packer build -var "cluster=${CLUSTER}" -var "vpc_name=${VPC_NAME}" -var "environment=${ENVIRONMENT}" -var "subnet_name=${SUBNET_NAME}"${ENABLE_DEBUG}"${TEMPLATE}"
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/build_bundle.py ===
+#!/usr/bin/env python3
+"""Emit AMI_CREATION_BUNDLE.txt: absolute paths + file contents (text; large files truncated)."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+OUT = ROOT / "AMI_CREATION_BUNDLE.txt"
+SKIP_NAMES = {OUT.name, ".git"}
+MAX_BYTES = 400_000  # per file cap in bundle
+
+
+def main() -> None:
+    lines: list[str] = [
+        "# ami-creation — full tree bundle",
+        f"# ROOT (absolute): {ROOT}",
+        f"# Generated (UTC): {datetime.now(timezone.utc).isoformat()}",
+        "",
+    ]
+    paths = sorted(
+        p
+        for p in ROOT.rglob("*")
+        if p.is_file() and not any(x in {".git", "__pycache__"} for x in p.parts)
+    )
+    n = 0
+    for path in paths:
+        if path.resolve() == OUT.resolve() or path.name in SKIP_NAMES or ".git" in path.parts:
+            continue
+        n += 1
+        ap = path.resolve()
+        try:
+            raw = ap.read_bytes()
+        except OSError as e:
+            lines.append(f"=== {ap} ===\n<read error: {e}>\n")
+            continue
+        lines.append(f"=== {ap} ===")
+        if len(raw) > MAX_BYTES:
+            lines.append(f"<truncated: {len(raw)} bytes, showing first {MAX_BYTES}>\n")
+            raw = raw[:MAX_BYTES]
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            lines.append(f"<binary {len(raw)} bytes, not included as text>\n")
+            continue
+        if not text.endswith("\n"):
+            text += "\n"
+        lines.append(text)
+    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Wrote {OUT} ({n} files, {OUT.stat().st_size} bytes)")
+
+
+if __name__ == "__main__":
+    main()
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-integration-eks-usw2.json ===
+{
+  "variables": {
+    "region": "us-west-2",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks",
+      "instance_type": "t2.micro",
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amazon-eks-node-al2023-x86_64-standard-1.29-v20251023",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "602401143452"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}",
+          "tag:env": "{{ user `environment` }}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "type": "amazon-ebs",
+      "tags": {
+        "env": "qa",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "packer-builder",
+        "billablefeature": "platform",
+        "stamp": "us3",
+        "costtype": "non-cogs",
+        "service": "infra-tool",
+        "microservice": "build",
+        "flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "env": "qa",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "packer-builder",
+        "billablefeature": "platform",
+        "stamp": "us3",
+        "costtype": "non-cogs",
+        "service": "infra-tool",
+        "microservice": "build",
+        "flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "env": "qa",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "packer-builder",
+        "billablefeature": "platform",
+        "stamp": "us3",
+        "costtype": "non-cogs",
+        "service": "infra-tool",
+        "microservice": "build",
+        "flightinfo": "non-flight"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.3.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh; sudo bash image-pull.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-integration-usw2.json ===
+{
+  "variables": {
+    "region": "us-west-2",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}",
+      "instance_type": "t2.micro",
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "al2023-ami-*-kernel-6.1-x86_64",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "137112412989"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}",
+          "tag:env": "{{ user `environment` }}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "ssh_port": 22,
+      "type": "amazon-ebs",
+      "tags": {
+        "env": "qa",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "packer-builder",
+        "billablefeature": "platform",
+        "stamp": "us3",
+        "costtype": "non-cogs",
+        "service": "infra-tool",
+        "microservice": "build",
+        "flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "env": "qa",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "packer-builder",
+        "billablefeature": "platform",
+        "stamp": "us3",
+        "costtype": "non-cogs",
+        "service": "infra-tool",
+        "microservice": "build",
+        "flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "env": "qa",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "packer-builder",
+        "billablefeature": "platform",
+        "stamp": "us3",
+        "costtype": "non-cogs",
+        "service": "infra-tool",
+        "microservice": "build",
+        "flightinfo": "non-flight"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.3.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/cis; sudo bash hardening.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-ireland-eks-euw1.json ===
+{
+  "variables": {
+    "region": "{{ env `AWS_REGION` }}",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks-1-32",
+      "instance_type": "t2.micro",
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amazon-eks-node-al2023-x86_64-standard-1.32-v20250801",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "602401143452"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "type": "amazon-ebs",
+      "tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "ireland",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "Name": "aws-eks-ami-132-packer",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-132-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "ireland",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-132-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "ireland",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight",
+        "Environment": "exotel-prod"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.25.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-mum-aps1.json ===
+{
+  "variables": {
+    "region": "{{ env `AWS_REGION` }}",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks",
+      "instance_type": "t2.micro",
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amazon-eks-node-al2023-x86_64-standard-1.28-v20250610",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "602401143452"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "type": "amazon-ebs",
+      "tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "mum",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "mum",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "mum",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight",
+        "Environment": "exotel-prod"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.1.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-mum-eks-aps1.json ===
+{
+  "variables": {
+    "region": "{{ env `AWS_REGION` }}",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks",
+      "instance_type": "t2.micro",
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amazon-eks-node-al2023-x86_64-standard-1.28-v20250610",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "602401143452"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "type": "amazon-ebs",
+      "tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "mum",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "mum",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "mum",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight",
+        "Environment": "exotel-prod"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.1.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh; sudo bash image-pull.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-sgp-apse1.json ===
+{
+  "variables": {
+    "region": "{{ env `AWS_REGION` }}",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks",
+      "instance_type": "t2.micro",
+      "ssh_interface": "private_ip",
+      "associate_public_ip_address": true,
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amazon-eks-node-al2023-x86_64-standard-1.28-v20250620",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "602401143452"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "type": "amazon-ebs",
+      "tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "sg",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "sg",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "sg",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight",
+        "Environment": "exotel-prod"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.0.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/exotel-sgp-eks-apse1.json ===
+{
+  "variables": {
+    "region": "{{ env `AWS_REGION` }}",
+    "ami_counter": "{{ env `BUILD_NUMBER` }}",
+    "cluster": "{{ env `CLUSTER` }}",
+    "vpc_name": "{{ env `VPC_NAME` }}",
+    "environment": "{{ env `ENVIRONMENT` }}",
+    "subnet_name": "{{ env `SUBNET_NAME` }}",
+    "packer_profile": "{{ env `PACKER_ROLE` }}"
+  },
+  "builders": [
+    {
+      "ami_name": "exotel-cpu-ami-{{ user `ami_counter` }}-eks",
+      "instance_type": "t2.micro",
+      "ssh_interface": "private_ip",
+      "associate_public_ip_address": true,
+      "region": "{{user `region`}}",
+      "iam_instance_profile": "{{ user `packer_profile` }}",
+      "source_ami_filter": {
+        "filters": {
+          "virtualization-type": "hvm",
+          "name": "amazon-eks-node-al2023-x86_64-standard-1.28-v20250620",
+          "root-device-type": "ebs"
+        },
+        "owners": [
+          "602401143452"
+        ],
+        "most_recent": true
+      },
+      "vpc_filter": {
+        "filters": {
+          "tag:Name": "{{user `vpc_name`}}"
+        }
+      },
+      "subnet_filter": {
+        "filters": {
+          "tag:Name": "{{user `subnet_name`}}"
+        },
+        "most_free": true
+      },
+      "encrypt_boot": true,
+      "ssh_username": "ec2-user",
+      "type": "amazon-ebs",
+      "tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "sg",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "sg",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight"
+      },
+      "run_volume_tags": {
+        "meta_env": "prod",
+        "meta_service": "infratools",
+        "meta_team": "infra",
+        "Name": "aws-eks-ami-126-packer",
+        "meta_billablefeature": "platform",
+        "meta_stamp": "sg",
+        "meta_costtype": "non-cogs",
+        "service": "infra-tool",
+        "meta_microservice": "build",
+        "meta_flightinfo": "non-flight",
+        "Environment": "exotel-prod"
+      },
+      "temporary_security_group_source_cidrs": [
+        "10.0.0.0/16"
+      ],
+      "temporary_iam_instance_profile_policy_document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "sts:GetCallerIdentity",
+              "ec2:DescribeInstances"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": "cloud-init status --wait"
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/"
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/init; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash set-facts.sh;",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "cd /tmp/scripts/management; sudo bash init.sh; sudo bash setup.sh {{ user `environment` }}; sudo bash reloads.sh; sudo bash packages.sh; sudo bash wazuh-installation.sh; sudo bash image-pull.sh",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    },
+    {
+      "type": "shell",
+      "inline": "sudo rm -rf /tmp/scripts",
+      "environment_vars": [
+        "ENVIRONMENT={{user `environment`}}"
+      ]
+    }
+  ]
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/00-motd-warning ===
+#!/bin/sh
+cat << EOF
+
+-------------------------------------- WARNING --------------------------------------
+
+                This computer system is for authorized use only.
+
+By using this system, all users acknowledge notice of, and agree to comply with, the Company's 
+Acceptable Use of Information Technology Resources Policy (“AUP”). Unauthorized or improper use of 
+this system may result in administrative disciplinary action, civil charges/criminal penalties, 
+and/or other sanctions as set forth in the University’s AUP. By continuing to use this system you 
+indicate your awareness of and consent to these terms and conditions of use.
+
+
+LOG OFF IMMEDIATELY if you do not agree to the conditions stated in this warning.
+
+-------------------------------------------------------------------------------------
+
+EOF
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/00-rsyslog-permissions.conf ===
+# This file sets the default permissions to the files created by rsyslogd
+# Fill needs to be copied to "/etc/rsyslog.d"
+
+$FileCreateMode 0600
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/cis-limits.conf ===
+# This file contains soft and hard limit confs to comply with CIS benchmark test
+# File will be copied to /etc/security/limits.d directory while building the AMI
+
+# Restrict core dumps
+* hard core 0
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/cis-modprobe.conf ===
+# This file sets the modprobe related configs to comply with CIS benchmark test
+# File will be copied to  /etc/modprobe.d directory while building the AMI
+
+# Disable unused file systems
+install squashfs /bin/true
+install  cramfs /bin/true
+install  freevxfs /bin/true
+install jffs2 /bin/true
+install hfs /bin/true
+install hfsplus /bin/true
+install udf /bin/true
+
+# Network level hardening
+options ipv6 disable=1
+install dccp /bin/true
+install sctp /bin/true
+install rds /bin/true
+install tipc /bin/true
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/cis-sysctl.conf ===
+# This file contains kernel parameter hardening confs to comply with CIS benchmark test
+# File will be copied to /etc/sysctl.d directory while building the AMI
+
+fs.suid_dumpable = 0
+kernel.randomize_va_space = 2
+net.ipv4.ip_forward = 0
+net.ipv4.conf.all.send_redirects = 0 
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0 
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0 
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv4.conf.all.log_martians = 1 
+net.ipv4.conf.default.log_martians = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv6.conf.all.accept_ra = 0 
+net.ipv6.conf.default.accept_ra = 0
+net.ipv6.conf.all.accept_redirects = 0 
+net.ipv6.conf.default.accept_redirects = 0
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/ssh_banner ===
+###############################################################
+#                 Authorized access only!                     # 
+# Disconnect IMMEDIATELY if you are not an authorized user!!! #
+#         All actions Will be monitored and recorded          #
+###############################################################
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/files/sshd_config ===
+Banner /etc/ssh/ssh_banner
+Port 22000
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+SyslogFacility AUTHPRIV
+LoginGraceTime 1m
+PermitRootLogin no
+MaxAuthTries 3
+AuthorizedKeysFile .ssh/authorized_keys
+HostbasedAuthentication no
+IgnoreRhosts yes
+PermitEmptyPasswords no
+PermitRootLogin forced-commands-only
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+GSSAPIAuthentication yes
+GSSAPICleanupCredentials no
+UsePAM yes
+X11Forwarding no
+PermitUserEnvironment no
+ClientAliveInterval 300
+ClientAliveCountMax 0
+AcceptEnv LANG LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES
+AcceptEnv LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT
+AcceptEnv LC_IDENTIFICATION LC_ALL LANGUAGE
+AcceptEnv XMODIFIERS
+AllowTcpForwarding no
+LogLevel VERBOSE
+AuthorizedKeysCommand /usr/bin/getsshkey
+AuthorizedKeysCommandUser root
+Ciphers aes128-ctr,aes192-ctr,aes256-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,umac-128@openssh.com
+KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/cis/hardening.sh ===
+#!/bin/bash
+
+# This script does the AMI harening tasks by executing bash commands
+# We can't directly copy the conf files to "root" owned directories via packer file provisioned
+# So we put the files in /tmp and move them by executing this shell script
+echo "Hardening is not fully configured yet, its WIP"
+# sudo cp /tmp/files/cis-limits.conf /etc/security/limits.d
+# sudo cp /tmp/files/cis-modprobe.conf /etc/modprobe.d
+# sudo cp /tmp/files/cis-sysctl.conf /etc/sysctl.d
+# sudo cp /tmp/files/sshd_config /etc/ssh
+# sudo cp /tmp/files/ssh_banner /etc/ssh
+# sudo cp /tmp/files/00-motd-warning /etc/update-motd.d
+# sudo cp /tmp/files/00-rsyslog-permissions.conf /etc/rsyslog.d
+# 
+# sudo chmod 600 /etc/ssh/sshd_config
+# sudo chmod 755 /etc/update-motd.d/00-motd-warning
+# sudo chmod 600 /boot/grub2/grub.cfg 
+# 
+# sudo find /var/log -type f -exec chmod g-wx,o-rwx {} +
+# sudo chmod og-rwx /etc/cron*
+echo "Cleaning up"
+rm -rf /tmp/files
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/env/ireland.env ===
+export AWS_VPC_DNS='eu-west-1.compute.internal*'
+export EXOTEL_VPC_DNS='search exodns.exotel.com eu-west-1.compute.internal'
+export DEFAULT_NAME_SERVER='10.25.0.2*'
+export EXOTEL_NAME_SERVER='nameserver 10.25.0.2'
+export DEFAULT_NDOTS_VALUE='ndots:3*'
+export EXOTEL_NDOTS_VALUE='options ndots:3'
+export EXOTEL_STAMP="ireland"
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/env/mum.env ===
+export AWS_VPC_DNS='ap-south-1.compute.internal*'
+export EXOTEL_VPC_DNS='search exodns.exotel.com ap-south-1.compute.internal'
+export DEFAULT_NAME_SERVER='10.1.0.2*'
+export EXOTEL_NAME_SERVER='nameserver 10.1.0.2'
+export DEFAULT_NDOTS_VALUE='ndots:3*'
+export EXOTEL_NDOTS_VALUE='options ndots:3'
+export EXOTEL_STAMP="mum"
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/env/prod.env ===
+export AWS_VPC_DNS='ap-southeast-1.compute.internal*'
+export EXOTEL_VPC_DNS='search exodns.exotel.com ap-southeast-1.compute.internal'
+export DEFAULT_NAME_sERVER='10.0.0.2*'
+export EXOTEL_NAME_SeRVER='nameserver 10.0.0.2'
+export DEFAULT_NDOTS_VALUE='ndots:3*'
+export EXOTEL_NDOTS_vALUE='options ndots:3'
+export EXOTEL_STAMP="sgp"
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/env/qa.env ===
+export DEFAULT_NAME_SERVER="nameserver"
+export EXOTEL_NAME_SERVER="10.3.0.2"
+export EXOTEL_NDOTS_VALUE='options ndots:3'
+export EXOTEL_REGION='us-west-2'
+export EXOTEL_STAMP="integration"
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/files/bashrc ===
+# .bashrc
+
+# User specific aliases and functions
+
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+
+# Source global definitions
+if [ -f /etc/bashrc ]; then
+        . /etc/bashrc
+fi
+
+export PERL_LOCAL_LIB_ROOT="$PERL_LOCAL_LIB_ROOT:/root/perl5";
+export PERL_MB_OPT="--install_base /root/perl5";
+export PERL_MM_OPT="INSTALL_BASE=/root/perl5";
+export PERL5LIB="/root/perl5/lib/perl5:$PERL5LIB";
+export PATH="/root/perl5/bin:$PATH";
+
+
+#for tmux
+tm() { tmux new -s "$1" ;}
+ta() { tmux attach -t "$1"; }
+tl() { tmux list-sessions; }
+tk() { tmux kill-session -t "$1" ; }
+
+function list {
+    list2 $1
+}       
+
+function iplist {
+    list2 $1
+}
+
+function list2 {
+    list_internal $1
+    DATE=$(date +%s%N);
+    mkdir -p  /tmp/list
+    servers=$(read -p "Enter Server Number you'd like to SSH: (CTRL+C to EXIT)     :    " serverNum ; aws ec2 describe-instances --query 'Reservations[].Instances[].[Tags[?Key==`Name`] | [0].Value,PrivateIpAddress,InstanceLifecycle,State.Name,InstanceType,LaunchTime]' --output table | grep -i $1 | awk -F"|" -v OFS="|" '{if ($4 == "  None ") $4="  OnDm "; print }' | sort -t'|' -k7 -V | awk -F"|" -v OFS="|"  '{printf("%s|%s|%s|%s|%s|  ",$2,$3,$4,$5,$6); system("date \"+Date: %d-%b-%Y  |  Time: %H:%M:%S IST\" -d" $7)}'  | nl | sed 's/ //g' | grep "^$serverNum" | cut -d"|" -f2 > /tmp/list/$USER-$1-$DATE ;)
+    echo -e  "\n\nGoing to ssh into " `head -n1 /tmp/list/$USER-$1-$DATE` "\n\n";
+    sleep 0.3
+    ssh `head -n1 /tmp/list/$USER-$1-$DATE`
+}
+
+function list_internal {
+    if [ "$#" -ne 1 ]
+      then
+        tput setaf 3; tput bold; echo -e "\nUSAGE : "; tput setaf 1; echo -e "\t\t  list <instance-name/IP/insance-type/State/LaunchedDate> \n"; tput sgr0;
+        return 1
+    fi
+    servers=$(aws ec2 describe-instances --query 'Reservations[].Instances[].[Tags[?Key==`Name`] | [0].Value,PrivateIpAddress,InstanceLifecycle,State.Name,InstanceType,LaunchTime]' --output table | grep -i $1 | awk -F"|" -v OFS="|" '{if ($4 == "  None ") $4="  OnDm "; print }' | sort -t'|' -k7 -V | awk -F"|" -v OFS="|"  '{printf("%s|%s|%s|%s|%s|  ",$2,$3,$4,$5,$6); system("date \"+Launched @ %H:%M:%S on %d-%b-%y (IST)\" -d" $7)}'  | nl ;)
+    if [[ $? != 0 ]]; then
+        echo "AWS Command failed."
+    elif [[ $servers ]]; then
+        echo -e "\nSearch Keyword : \"$1\" \n\nResult:\n";
+        tput setaf 3; tput bold;  echo -e "$servers"; tput sgr0;
+        echo -e "\n\t\t\t\t\t\t\tHave a nice day!!\n\n"
+    else
+        echo -e "\nSorry!! No servers found matching with \"$1\" \n\n"
+    fi
+}
+
+iplistbkp () {  aws ec2 describe-instances --filter Name=tag:Name,Values=*$1* --query 'Reservations[].Instances[].[Tags[?Key==`Name`].Value, PrivateIpAddress]' --output table;}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/files/sshconfig ===
+Host 10.*
+    Port 22000
+    ForwardAgent yes
+    StrictHostKeyChecking no
+
+Host *.exotel.in
+   Port 22000
+   ForwardAgent yes
+   StrictHostKeyChecking no
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/files/sshd_config ===
+# Removed unnecessary comments and parameters
+# Why carry the bagagge thats not used?
+Port 22000
+SyslogFacility AUTHPRIV
+PermitRootLogin without-password
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+PrintLastLog yes
+UsePrivilegeSeparation sandbox          # Default for new installations.
+AcceptEnv LANG LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES
+AcceptEnv LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT
+AcceptEnv LC_IDENTIFICATION LC_ALL LANGUAGE
+AcceptEnv XMODIFIERS
+Subsystem sftp  /usr/libexec/openssh/sftp-server
+LogLevel VERBOSE
+AllowTcpForwarding no
+X11Forwarding no
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/files/tmux.conf ===
+set-window-option -g xterm-keys on
+
+# Change key-bindings for moving control between panes
+bind -n M-Left select-pane -L
+bind -n M-Right select-pane -R
+bind -n M-Up select-pane -U
+bind -n M-Down select-pane -D
+
+# Alt-n for new window
+bind -n M-n new-window
+
+# Alt-r for renaming window
+bind -n M-r command-prompt "rename-window %%"
+
+# Ctrl-tab Switching between windows
+bind-key C-T last-window
+
+# Use window switching using Shift + Left / Right arrow
+bind -n S-left prev
+bind -n S-right next
+
+# Swap window with left/right
+bind -n S-Up swap-window -t -1
+bind -n S-Down swap-window -t +1
+
+# Enable pane-switching using mouse
+set-option -g mouse-select-pane on
+
+# Monitor events happening on other windows
+setw -g monitor-activity on
+set -g visual-activity on
+
+# Start window numbering from 1 instead of 0
+set -g base-index 1
+
+# Agressive resize
+setw -g aggressive-resize on
+
+# Change the default coloring and display
+set -g status-bg black
+set -g status-fg white
+set-window-option -g window-status-current-bg red
+set -g status-left ""
+set -g status-right '#[fg=green,bold]#S:#H #[fg=white,bold]#(cut -d " " -f 1-2 /proc/loadavg)#[default] #[fg=cyan,bold]%Y-%m-%d#[default]'
+
+# Sane scrolling
+set -g terminal-overrides 'xterm*:smcup@:rmcup@'
+
+# Easy bindings for split
+unbind %
+#split horizontally
+bind | split-window -h
+#split vertically
+bind - split-window -v
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/files/vimrc ===
+""""""
+" UI "
+""""""
+
+" disable vi compatibility
+set nocompatible
+" Set paste
+set paste
+" automatically load changed files
+set autoread
+
+" auto-reload vimrc
+autocmd! bufwritepost vimrc source ~/.vim/vimrc
+"autocmd! bufwritepost gvimrc source ~/.vim/gvimrc
+
+" show the filename in the window titlebar
+set title
+
+" set encoding
+set encoding=utf-8
+
+" directories for swp files
+set backupdir=~/.vim/backup
+set directory=~/.vim/backupf
+
+" display incomplete commands at the bottom
+set showcmd
+
+" mouse support
+set mouse=a
+
+" line numbers
+set number
+
+" highlight cursor line
+set cursorline
+
+" wrapping stuff
+set textwidth=80
+set colorcolumn=80
+
+" ignore whitespace in diff mode
+set diffopt+=iwhite
+
+" Be able to arrow key and backspace across newlines
+set whichwrap=bs<>[]
+
+" Status bar
+set laststatus=2
+
+" remember last cursor position
+autocmd BufReadPost *
+	\ if line("'\"") > 0 && line("'\"") <= line("$") |
+	\ 	exe "normal g`\"" |
+	\ endif
+
+" show '>   ' at the beginning of lines that are automatically wrapped
+set showbreak=>\ \ \ 
+
+" enable completion
+set ofu=syntaxcomplete#Complete
+
+" make laggy connections work faster
+set ttyfast
+
+" let vim open up to 100 tabs at once
+set tabpagemax=100
+
+" case-insensitive filename completion
+set wildignorecase
+
+"""""""""""""
+" Searching "
+"""""""""""""
+
+set hlsearch "when there is a previous search pattern, highlight all its matches
+set incsearch "while typing a search command, show immediately where the so far typed pattern matches
+set ignorecase "ignore case in search patterns
+set smartcase "override the 'ignorecase' option if the search pattern contains uppercase characters
+set gdefault "imply global for new searches
+
+"""""""""""""
+" Indenting "
+"""""""""""""
+
+" When auto-indenting, use the indenting format of the previous line
+set copyindent
+" When on, a <Tab> in front of a line inserts blanks according to 'shiftwidth'.
+" 'tabstop' is used in other places. A <BS> will delete a 'shiftwidth' worth of
+" space at the start of the line.
+set smarttab
+" Copy indent from current line when starting a new line (typing <CR> in Insert
+" mode or when using the "o" or "O" command)
+set autoindent
+" Automatically inserts one extra level of indentation in some cases, and works
+" for C-like files
+set smartindent
+
+"""""""""
+" Theme "
+"""""""""
+
+syntax enable
+"set background=dark "uncomment this if your terminal has a dark background
+
+""""""""
+" GVim "
+""""""""
+
+"disable cursor blinking
+set gcr=n:blinkon0
+
+"remove menu bar
+set guioptions-=m
+
+"""""""""""""""""""""
+" Language-Specific "
+"""""""""""""""""""""
+
+" load the plugin and indent settings for the detected filetype
+filetype plugin indent on
+
+" Thorfile, Rakefile, Vagrantfile and Gemfile are Ruby
+au BufRead,BufNewFile {Gemfile,Rakefile,Vagrantfile,Thorfile,config.ru} set ft=ruby
+au BufRead,BufNewFile *.html.erb set ft=eruby
+
+" Add json syntax highlighting
+au BufNewFile,BufRead *.json set ft=json syntax=javascript
+"Turn on backup option
+set backup 
+"Where to store backups
+set backupdir=~/.vim/backup//
+"Make backup before overwriting the current buffer
+set writebackup
+
+"Overwrite the original backup file
+set backupcopy=yes
+set cursorline        " highlight current line
+"Meaningful backup name, filename@2015-04-05.14:59
+au BufWritePre * let &bex = '@' . strftime("%F.%H:%M")
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/functions.sh ===
+#!/bin/env bash
+set -e  # Exit on any error
+set -o pipefail  # Ensure pipes fail properly
+red="\e[0;91m"
+blue="\e[0;94m"
+expand_bg="\e[K"
+blue_bg="\e[0;104m${expand_bg}"
+red_bg="\e[0;101m${expand_bg}"
+green_bg="\e[0;102m${expand_bg}"
+green="\e[0;92m"
+white="\e[0;97m"
+bold="\e[1m"
+uline="\e[4m"
+reset="\e[0m"
+
+# Variables
+BASHRC_SRC="files/bashrc"
+SSHCONFIG_SRC="files/sshconfig"
+TMUXCONF_SRC="files/tmux.conf"
+VIMCONFIG_SRC="files/vimrc"
+AWS_CONFIG_TPL="tmpl/aws.config.tpl"
+
+config_setup() {
+    # Example usage:
+    # config_setup exotel exotel
+    # config_setup root root
+    local user="$1"
+    local group="$2"
+
+    if [[ -z "$user" || -z "$group" ]]; then
+        echo "Usage: config_setup <user> <group>"
+        return 1
+    fi
+
+    echo "Configuring setup for user: $user, group: $group..."
+
+    # Check if group exists; if not, create it
+    if ! getent group "$group" &>/dev/null; then
+        echo "Group $group does not exist. Creating it..."
+        groupadd "$group"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to create group $group."
+            return 1
+        fi
+    fi
+
+    # Check if user exists; if not, create it and assign to the group
+    if ! id "$user" &>/dev/null; then
+        echo "User $user does not exist. Creating it..."
+        useradd -m -s /bin/bash -g "$group" "$user"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to create user $user."
+            return 1
+        fi
+    fi
+
+    # Create required directories
+    local dirs=("/home/$user/.ssh/" "/etc/skel/.ssh/" "/tmp/list" "/home/$user/.aws")
+    for dir in "${dirs[@]}"; do
+        mkdir -p "$dir"
+        chmod 0755 "$dir"
+        chown "$user:$group" "$dir"
+    done
+    chmod 0777 /tmp/list  # Specific permission for /tmp/list
+
+    # Copy files for the specified user
+    echo "Copying bashrc configuration files for $user..."
+    cp "$BASHRC_SRC" "/home/$user/.bashrc"
+    chmod 0644 "/home/$user/.bashrc"
+    chown "$user:$group" "/home/$user/.bashrc"
+
+    echo "Copying ssh configuration files for $user..."
+    cp "$SSHCONFIG_SRC" "/home/$user/.ssh/config"
+    chmod 0644 "/home/$user/.ssh/config"
+    chown "$user:$group" "/home/$user/.ssh/config"
+
+    echo "Copying tmux configuration files for $user..."
+    cp "$TMUXCONF_SRC" "/home/$user/.tmux.conf"
+    chmod 0644 "/home/$user/.tmux.conf"
+    chown "$user:$group" "/home/$user/.tmux.conf"
+
+    echo "copying vim configuration files for $user..."
+    mkdir -p "/home/$user/.vim/backup"
+    cp "$VIMCONFIG_SRC" "/home/$user/.vimrc"
+    chmod 0644 "/home/$user/.vimrc"
+    chown "$user:$group" "/home/$user/.vimrc"
+
+    echo "copying aws configuration files for $user..."
+    AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+    mkdir -p "/home/$user/.aws"
+    cat "$AWS_CONFIG_TPL" | envsubst > aws.config
+    cp aws.config "/home/$user/.aws/config"
+    chmod 0644 "/home/$user/.aws/config"
+    chown -R "$user:$group" "/home/$user/.aws/"
+    echo "Configuration setup for $user completed!"
+}
+
+setup_root() {
+    echo "Copying bashrc configuration files for root..."
+    cp "$BASHRC_SRC" "/root/.bashrc"
+    chmod 0644 "/root/.bashrc"
+    chown "root:root" "/root/.bashrc"
+
+    echo "Copying ssh configuration files for root..."
+    cp "$SSHCONFIG_SRC" "/root/.ssh/config"
+    chmod 0644 "/root/.ssh/config"
+    chown "root:root" "/root/.ssh/config"
+
+    echo "Copying tmux configuration files for root..."
+    cp "$TMUXCONF_SRC" "/root/.tmux.conf"
+    chmod 0644 "/root/.tmux.conf"
+    chown "root:root" "/root/.tmux.conf"
+
+    echo "copying vim configuration files for root..."
+    mkdir -p "/root/.vim/backup"
+    cp "$VIMCONFIG_SRC" "/root/.vimrc"
+    chmod 0644 "/root/.vimrc"
+    chown "root:root" "/root/.vimrc"
+
+    echo "copying aws configuration files for root..."
+    AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+    mkdir -p "/root/.aws"
+    cat "$AWS_CONFIG_TPL" | envsubst > aws.config
+    cp aws.config "/root/.aws/config"
+    chmod 0644 "/root/.aws/config"
+    chown -R "root:root" "/root/.aws/"
+    echo "Configuration setup for root completed!"
+
+}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/init.sh ===
+#!/bin/env bash
+set -ea
+source functions.sh
+whoami
+echo $ENVIRONMENT
+# Set hostname
+echo "Setting hostname..."
+sudo hostnamectl set-hostname "base-ami"
+
+# Update log level to verbose in /etc/sysconfig/network
+echo "Setting log level..."
+
+if grep -q '^HOSTNAME ' /etc/sysconfig/network; then
+    sudo sed -i 's/^HOSTNAME .*/HOSTNAME=base-ami/' /etc/sysconfig/network
+else
+    echo "HOSTNAME=packer-base-ami" | sudo tee -a /etc/sysconfig/network
+fi
+echo "Script initiation completed!"
+
+if [ -f ./files/awsm ]; then
+    sudo cp ./files/awsm /usr/local/bin/
+    sudo chmod +x /usr/local/bin/awsm
+else
+    echo "File ./files/awsm not found."
+fi
+
+if [ -f ./files/ross ]; then
+    sudo cp ./files/ross /usr/local/bin/
+    sudo chmod +x /usr/local/bin/ross
+else
+    echo "File ./files/ross not found."
+fi
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/set-facts.sh ===
+#!/bin/env bash
+set -ea
+# Fetch instance ID and region using IMDS
+# This will create problem if we move to imdsv2 in future.
+export TIMESTAMP=$(date +%s)
+echo "Timestamp: $TIMESTAMP"
+export USER="${SETUP_USER:exotel}"
+export SETUP_SERVICE="${SETUP_SERVICE:heimdall-authorizer}"
+export SERVICE="heimdall"
+export SRC="/home/${USER}/exotel_deployment/${SERVICE}/${SERVICE}-${TIMESTAMP}/${SERVICE}.tar.gz"
+export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+export AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+export S3_BUILD_BUCKET_NAME="exotel-build" # Replace with actual bucket name
+export TARGET_VERSION="latest-stable"
+export ENV="prod" # Replace with actual environment
+
+# Get lifecycle value for the current instance
+export LIFECYCLE=$(aws ec2 describe-instances \
+  --instance-id "$INSTANCE_ID" \
+  --region "$AWS_REGION" \
+  --query 'Reservations[*].Instances[*].[InstanceLifecycle]' \
+  --output text)
+
+# Set timestamp
+# Define the source and destination files
+SRC="${SERVICE}-${VERSION}.tar.gz"
+FILENAME="${SERVICE}.tar.gz"
+DESTINATION_PATH="/home/exotel/exotel_deployment/${SERVICE}/${SERVICE}-${TIMESTAMP}/${FILENAME}"
+
+# Set ulimit
+echo -e "exotel soft nofile 300000\nexotel hard nofile 300000" | sudo tee -a /etc/security/limits.conf
+echo "Ulimit has been set."
+
+# Create required directories
+DEPLOY_DIR="/home/exotel/exotel_deployment/${SERVICE}/${SERVICE}-${TIMESTAMP}"
+sudo mkdir -p "$DEPLOY_DIR"
+sudo chown exotel:exotel "$DEPLOY_DIR"
+echo "Created directory: $DEPLOY_DIR"
+
+# Install pip if not on Ubuntu
+if [[ "$(cat /etc/os-release | grep '^ID=')" != *"ubuntu"* ]]; then
+  yum install -y python-pip cronie 
+  sudo systemctl enable crond.service
+  sudo systemctl start crond.service
+  sudo systemctl status crond | grep 'Active'
+fi
+
+# Install boto, boto3, and botocore
+pip install boto botocore boto3
+echo "Installed boto, boto3, and botocore."
+
+# Fetch AWS region (debugging purpose)
+echo "AWS region: $AWS_REGION"
+
+# Handle version fetching from S3
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/setup.sh ===
+#!/bin/env bash
+set -ea
+source functions.sh
+ENVIRONMENT=$1
+echo "Environment is set to be: ${ENVIRONMENT}"
+config_setup exotel exotel
+config_setup ec2-user ec2-user
+config_setup exomon exomon
+# config_setup adaptive adaptive
+setup_root
+usermod -aG wheel exotel
+if [ -e env/${ENVIRONMENT}.env ]; then
+    echo "${ENVIRONMENT} File exists, sourcing"
+    source "env/${ENVIRONMENT}.env"
+    echo "Updated Configuration for ${ENVIRONMENT}"
+    cp files/sshd_config /etc/ssh/sshd_config
+    chown root:root /etc/ssh/sshd_config
+    echo "Updated SSHD configuration file"
+    cat /etc/resolv.conf
+else
+    echo "${red} ${ENVIRONMENT}.env File does not exists in env/.${reset}"
+fi
+source awsm -r "${EXOTEL_REGION}" -f "infra/${EXOTEL_STAMP}/adaptive"
+if [ -n "${ADAPTIVE_SSH_PUBLIC_KEY}" ]; then
+  for user in exotel; do
+    homedir="/home/$user"
+    mkdir -p "$homedir/.ssh"
+    echo "${ADAPTIVE_SSH_PUBLIC_KEY}" | base64 -d -w 0 | tee -a "$homedir/.ssh/authorized_keys" > /dev/null
+    chown -R "$user:$user" "$homedir/.ssh/authorized_keys"
+    echo "✔ SSH key added for user: $user"
+  done
+else
+  echo " ✗ Adaptive public key not found for ${ENV}"
+fi
+echo "Copying public keys of adaptive to adaptive user"
+echo "Setting up ROSS"
+echo "─────────────────────────────"
+if [ -n "${EXOTEL_STAMP}" ]; then 
+    mkdir -p /etc/ross
+    sudo cat "../management/files/ross.env" | envsubst > "/etc/ross/ross.env"
+    sudo chown exotel:exotel /etc/ross/ross.env
+    sudo chmod 600 /etc/ross/ross.env
+    sudo touch /etc/ross/exotel_authorized_keys.ts
+    sudo chown exotel:exotel /etc/ross/exotel_authorized_keys.ts
+else
+    echo "✗ Unable to find ross config"
+fi
+
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/tmpl/aws.config.tpl ===
+[default]
+region = ${AWS_REGION}
+output = json
+
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/init/tmpl/resolv.conf.tmpl ===
+${DEFAULT_NAME_SERVER} ${EXOTEL_NAME_SERVER}
+${AWS_VPC_DNS} ${EXOTEL_VPC_DNS}
+${DEFAULT_NDOTS_VALUE} ${EXOTEL_NDOTS_VALUE}
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/99-disable-ipv6.conf ===
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/configuration ===
+
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/getsshkey ===
+#!/bin/bash
+cd /usr/bin/authenticator; ./authenticator key $1
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/heimdall ===
+Host_Alias    WHEELHOSTS = ALL
+Cmnd_Alias    WHEELCOMMANDSALLOWED = ALL
+Runas_Alias    WHEELUSERS = ALL
+%wheel    WHEELHOSTS=(WHEELUSERS)    NOPASSWD:WHEELCOMMANDSALLOWED
+Host_Alias    SUDOHOSTS = ALL
+Cmnd_Alias    SUDOCOMMANDSALLOWED = ALL
+Cmnd_Alias    SUDONOTALLOWEDCOMMANDS = /bin/su, /bin/adduser, /bin/addgroup
+Runas_Alias    SUDOUSERS = ALL
+%sudo    SUDOHOSTS=(SUDOUSERS)    NOPASSWD:SUDOCOMMANDSALLOWED, !SUDONOTALLOWEDCOMMANDS
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/key-sync.service ===
+[Unit]
+Description=ROSS - Rotation Of Secrets Service
+After=network-online.target nss-lookup.target systemd-resolved.service
+Wants=network-online.target
+
+# Start at resume-from-suspend too
+StartLimitIntervalSec=0
+
+[Service]
+User=exotel
+Group=exotel
+Type=simple
+ExecStart=/usr/local/bin/ross
+Restart=always
+RestartSec=900s
+
+# Optional: in case you want systemd to inject it (script already sources it)
+EnvironmentFile=/etc/ross/ross.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target suspend.target
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/ross.env ===
+# /etc/ross/ross.env
+
+# Name of the secret in AWS Secrets Manager
+SECRET_NAME="infra/${EXOTEL_STAMP}/adaptive"
+
+SECRET_SPECIFIC_KEY="ADAPTIVE_SSH_PUBLIC_KEY"
+
+# Where to store the rotated key
+AUTH_KEYS_FILE="/home/exotel/.ssh/authorized_keys"
+
+# Timestamp file to track updates
+LAST_UPDATE_FILE="/etc/ross/exotel_authorized_keys.ts"
+
+# Sleep base in seconds (13 minutes)
+SLEEP_BASE=780
+
+# Max jitter in seconds (6 minutes)
+SLEEP_JITTER=360
+
+# Failures before backoff
+MAX_FAILURES=5
+
+# Optional identifier for logs
+ROSS_NAME="exotel-key-rotation"
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/vim-cleanup ===
+#!/bin/bash
+
+# Get the list of all users from /etc/passwd
+# Adjust to include only users with valid home directories (e.g., not system users)
+for USER_HOME in $(awk -F: '($3 >= 1000 && $7 !~ /nologin|false/) {print $6}' /etc/passwd); do
+    BACKUP_DIR="$USER_HOME/.vim/backup"
+    # Check if the backup directory exists for the user
+    if [ -d "$BACKUP_DIR" ]; then
+        echo "Cleaning up old backup files in $BACKUP_DIR for user $(basename $USER_HOME)..."
+        # Find and delete files older than 10 days
+        echo "find \"$BACKUP_DIR\" -type f -mtime +10 -exec rm -f {} \;"
+        echo "Cleanup complete for user $(basename $USER_HOME)."
+    else
+        echo "Backup directory $BACKUP_DIR does not exist for user $(basename $USER_HOME). Skipping..."
+    fi
+done
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/vim-cleanup.service ===
+[Unit]
+Description=Run vim-cleanup script
+Wants=vim-cleanup.timer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/vim-cleanup
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/files/vim-cleanup.timer ===
+[Unit]
+Description=Timer to run vim-cleanup script daily at 4 AM
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/image-pull.sh ===
+#!/bin/bash
+
+# This is a file meant to pull all the required daemonset images and then bake it into AMI
+# Itself, why? Because 
+# 1. This will improve the node up time, it will not have to pull all of the daemonset images
+# 2. It will also reduce our NAT gateway cost so that the images are needed to be pulled only once
+#
+
+pull_with_retry() {
+    local image="$1"
+    local max_retries=10
+    local delay=10
+
+    for ((attempt=1; attempt<=max_retries; attempt++)); do
+        echo "🔄 Attempt $attempt: Pulling $image"
+        if sudo nerdctl pull "$image"; then
+            echo "✔ Success: $image"
+            return 0
+        else
+            echo "⚠ Failed to pull $image. Retrying in $delay seconds..."
+            sleep $delay
+            delay=$((delay * 2))
+        fi
+    done
+
+    echo "✗ ERROR: Could not pull $image after $max_retries attempts."
+    return 1
+}
+
+sudo systemctl start containerd.service
+DAEMONSET_IMAGES=(
+        docker.io/exotelorg/fluentd-kafka:1.1.30
+        docker.io/grafana/promtail:1.5.0
+        docker.io/kubeaws/kube-spot-termination-notice-handler:1.13.7-1
+        public.ecr.aws/m8j6m5q1/fluentd-kafka:1.1.30
+        public.ecr.aws/m8j6m5q1/opensource-public:fluentd-monitoring.1.2.0
+        public.ecr.aws/m8j6m5q1/opensource-public:kube-spot-termination-notice-handler.1.13.7-1
+        public.ecr.aws/m8j6m5q1/opensource-public:logrotate.1.3
+        quay.io/prometheus/node-exporter:v0.18.0
+        registry.k8s.io/dns/k8s-dns-node-cache:1.24.0
+        docker.io/istio/pilot:1.18.3
+        docker.io/istio/pilot:1.19.3
+	docker.io/istio/pilot:1.24.3
+        mozilla/sops:latest
+)
+
+for images in ${DAEMONSET_IMAGES[@]}; do 
+    sudo nerdctl pull $images
+done
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/init.sh ===
+#!/bin/env bash
+set -ea
+whoami
+export USER="exotel"
+export SERVICE_NAME="$(cat /tmp/scripts/metadata | head -n1)"
+sudo cp "files/vim-cleanup" "/usr/bin/vim-cleanup"
+sudo chmod +x "/usr/bin/vim-cleanup"
+sudo cp "files/vim-cleanup.service" "/etc/systemd/system/vim-cleanup.service"
+sudo cp "files/vim-cleanup.timer" "/etc/systemd/system/vim-cleanup.timer"
+sudo cp "files/key-sync.service" "/etc/systemd/system/key-sync.service"
+sudo mkdir -p "/etc/ross"
+sudo systemctl daemon-reload
+sudo systemctl enable vim-cleanup.timer
+sudo systemctl start vim-cleanup.timer
+sudo systemctl enable key-sync.service
+sudo systemctl start key-sync.service
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/packages.sh ===
+#!/bin/bash
+# Installing WAZUH
+sudo rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
+sudo cat > /etc/yum.repos.d/wazuh.repo << EOF
+[wazuh]
+gpgcheck=1
+gpgkey=https://packages.wazuh.com/key/GPG-KEY-WAZUH
+enabled=1
+name=EL-\$releasever - Wazuh
+baseurl=https://packages.wazuh.com/4.x/yum/
+protect=1
+EOF
+sudo dnf update
+sudo dnf upgrade --refresh -y
+sudo dnf install wget vim -y
+sudo dnf install python3 python3-pip -y
+# iptables v1.8.x uses nf_tables (nftables) by default, but EKS networking stack (esp. kube-proxy + AWS VPC CNI) still relies on legacy iptables backend.
+# Hence, Installing iptables-legacy, also removing docker and docker services entirely
+sudo dnf install iptables-legacy  -y # This is required by EKS
+sudo sed -i "s/^enabled=1/enabled=0/" /etc/yum.repos.d/wazuh.repo
+wget -c https://github.com/junegunn/fzf/releases/download/v0.58.0/fzf-0.58.0-linux_amd64.tar.gz -O fzf.tgz
+tar -zxvf fzf.tgz
+sudo install fzf /usr/local/bin
+which fzf
+sudo dnf clean all
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/reloads.sh ===
+sudo systemctl restart sshd
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/setup.sh ===
+#!/bin/bash
+
+# Variables
+export USER="exotel"
+export TIMESTAMP=$(date +%Y%m%d%H%M%S) # Current timestamp
+
+echo "Setting up Sudoers file of Heimdall"
+export SERVICE="HEIMDALL"
+SUDOER_SRC="files/heimdall"
+SUDOER_DEST="/home/${USER}/heimdall"
+cp "$SUDOER_SRC" "$SUDOER_DEST"
+chown "${USER}:${USER}" "$SUDOER_DEST"
+
+# 6. Verify HEIMDALL sudoers syntax
+visudo -cf "$SUDOER_DEST"
+
+# 7. Copy HEIMDALL sudoer file to /etc/sudoers.d/
+SUDOER_DEST_GLOBAL="/etc/sudoers.d/heimdall"
+cp "$SUDOER_DEST" "$SUDOER_DEST_GLOBAL"
+chmod 0440 "$SUDOER_DEST_GLOBAL"
+chown root:root "$SUDOER_DEST_GLOBAL"
+
+echo "Not installing Heimdall as we are moving fully to adaptive"
+sudo cp files/99-disable-ipv6.conf /etc/sysctl.d/
+sudo sysctl --system
+# Disable ALT+CTRL+DEL anyways
+sudo systemctl mask ctrl-alt-del.target || echo "ctrl-alt-del is already masked"
+
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/management/wazuh-installation.sh ===
+#!/bin/env bash
+
+#################################################################
+# █   ████████                                          ████    # 
+# █   ████████                        ██                ████    # 
+# █   ██                              ██                  ██    # 
+# █   ██        ███  ███   ░████░   ███████    ░████▒     ██    # 
+# █   ██         ██▒▒██   ░██████░  ███████   ░██████▒    ██    # 
+# █   ███████    ▒████▒   ███  ███    ██      ██▒  ▒██    ██    # 
+# █   ███████     ████    ██░  ░██    ██      ████████    ██    # 
+# █   ██          ▒██▒    ██    ██    ██      ████████    ██    # 
+# █   ██          ████    ██░  ░██    ██      ██          ██    # 
+# █   ██         ▒████▒   ███  ███    ██░     ███░  ▒█    ██▒   # 
+# █   ████████   ██▒▒██   ░██████░    █████   ░███████    █████ # 
+# █   ████████  ███  ███   ░████░     ░████    ░█████▒    ░████ # 
+#################################################################
+set -ea
+# Ansi color code variables
+# For color coding the output
+red="\e[0;91m"
+blue="\e[0;94m"
+expand_bg="\e[K"
+blue_bg="\e[0;104m${expand_bg}"
+red_bg="\e[0;101m${expand_bg}"
+green_bg="\e[0;102m${expand_bg}"
+green="\e[0;92m"
+white="\e[0;97m"
+bold="\e[1m"
+uline="\e[4m"
+reset="\e[0m"
+
+### -- Setup --- ###
+export WAZUH_SETUP_NAME="wazuh-agent.rpm"
+export WAZUH_DOWNLOAD_URL="https://packages.wazuh.com/4.x/yum/wazuh-agent-4.11.2-1.x86_64.rpm"
+export WAZUH_MANAGER_URL="gateway.exotel.com"
+export WAZUH_AGENT_GROUP_NAME="platform"
+export YARA_DOWNLOAD_URL="https://github.com/VirusTotal/yara/archive/v4.2.3.tar.gz"
+export YARA_NAME="yara-4-2-3.tgz"
+
+echo "${green} Initiating Wazuh Setup ${reset}"
+echo "-----------------------------------------"
+echo "▄▄      ▄▄                               ▄▄       "
+echo "██      ██                               ██       "
+echo "▀█▄ ██ ▄█▀  ▄█████▄  ████████  ██    ██  ██▄████▄ "
+echo " ██ ██ ██   ▀ ▄▄▄██      ▄█▀   ██    ██  ██▀   ██ "
+echo " ███▀▀███  ▄██▀▀▀██    ▄█▀     ██    ██  ██    ██ "
+echo " ███  ███  ██▄▄▄███  ▄██▄▄▄▄▄  ██▄▄▄███  ██    ██ "
+echo " ▀▀▀  ▀▀▀   ▀▀▀▀ ▀▀  ▀▀▀▀▀▀▀▀   ▀▀▀▀ ▀▀  ▀▀    ▀▀ "
+echo "                                                  "
+
+### -- Download --- ###
+mkdir -p /tmp/wazuh-setup
+cd /tmp/wazuh-setup
+echo "${green}Downloading Wazuh Setup ${reset}"
+wget -c ${WAZUH_DOWNLOAD_URL} -O ${WAZUH_SETUP_NAME} || echo "Trouble Downloading the packages please check" || echo "${red}Trouble Downloading the wazuh-agent packages please check${reset}"
+sudo WAZUH_MANAGER=${WAZUH_MANAGER_URL} WAZUH_AGENT_GROUP=${WAZUH_AGENT_GROUP_NAME} rpm -ihv ${WAZUH_SETUP_NAME}
+sudo systemctl enable wazuh-agent.service
+sudo systemctl start wazuh-agent.service
+### Removing YARA configuration Until necessary and designed correctly
+
+=== /Users/shashidhara.reddy/infra_code/ami-creation/scripts/tests/cis-reporting/script.sh ===
+#!/bin/env bash
+wget -c https://github.com/aquasecurity/linux-bench/releases/download/v0.5.0/linux-bench_0.5.0_linux_arm64.rpm -O lb.rpm
+sudo rpm -i lb.rpm
+which linux-bench
+
